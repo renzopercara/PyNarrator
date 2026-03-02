@@ -41,7 +41,7 @@ def _make_clip_for_scene(asset_path: str, duration: float):
     - If no valid asset is available a black fallback clip is returned.
     """
     if not asset_path or not os.path.exists(asset_path):
-        return ColorClip(size=VIDEO_RES, color=(0, 0, 0), duration=duration)
+        return ColorClip(size=VIDEO_RES, color=(50, 50, 50), duration=duration)
 
     ext = os.path.splitext(asset_path)[1].lower()
 
@@ -53,9 +53,13 @@ def _make_clip_for_scene(asset_path: str, duration: float):
             clip = clip.fx(vfx.loop, duration=duration)
         return clip
 
-    # Static image – Ken Burns zoom-in (scale grows 2% per second)
+    # Static image – Ken Burns zoom-in (scale grows 2% per second).
+    # set_duration() is called explicitly after construction to satisfy
+    # MoviePy's internal timeline even when duration is also given to the
+    # ImageClip constructor.
     img_clip = (
-        ImageClip(asset_path, duration=duration)
+        ImageClip(asset_path)
+        .set_duration(duration)
         .resize(lambda t: min(1 + 0.02 * t, 1.3))
         .set_position("center")
     )
@@ -124,6 +128,11 @@ async def main():
 
         # 9. Exportar
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        total_duration = final_video.duration
+        print(
+            f"[DEBUG] Imágenes encontradas: {len(scene_clips)} | "
+            f"Duración total del video: {total_duration:.2f}s"
+        )
         logger.info("💾 Exportando a %s...", OUTPUT_PATH)
         final_video.write_videofile(
             OUTPUT_PATH,
