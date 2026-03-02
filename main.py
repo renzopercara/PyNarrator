@@ -53,10 +53,10 @@ def _make_clip_for_scene(asset_path: str, duration: float):
             clip = clip.fx(vfx.loop, duration=duration)
         return clip
 
-    # Static image – Ken Burns zoom-in (scale 1.0 → 1.15 over the clip)
+    # Static image – Ken Burns zoom-in (scale grows 2% per second)
     img_clip = (
         ImageClip(asset_path, duration=duration)
-        .resize(lambda t: 1.0 + 0.15 * t / max(duration, 0.001))
+        .resize(lambda t: min(1 + 0.02 * t, 1.3))
         .set_position("center")
     )
     return CompositeVideoClip([img_clip], size=VIDEO_RES).set_duration(duration)
@@ -100,6 +100,8 @@ async def main():
         for i, (data, asset_path) in enumerate(zip(voice_data, visual_assets), start=1):
             logger.info("   [%d/%d] Procesando: %s...", i, total, data["texto"][:50])
             clip = _make_clip_for_scene(asset_path, data["duracion"])
+            if scene_clips:  # skip crossfade on the very first clip
+                clip = clip.crossfadein(0.5)
             scene_clips.append(clip)
 
         # 5. Concatenar todas las escenas
