@@ -1,18 +1,132 @@
 import json
 import asyncio
+import os
+
 from src.narrator import ArgentineNarrator
-# Importaremos el resto luego
+from src.image_manager import get_visual_assets
+from src.subtitle_generator import generate_subtitles
+from src.config import OUTPUT_DIR, AUDIO_DIR, VIDEO_RES
+
+from moviepy.editor import (
+    VideoFileClip,
+    ImageClip,
+    AudioFileClip,
+    ColorClip,
+    CompositeVideoClip,
+    concatenate_videoclips,
+    vfx,
+)
+
+VIDEO_W, VIDEO_H = VIDEO_RES
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "video_final_py_narrator.mp4")
+
+
+def _make_clip_for_scene(asset_path: str, duration: float):
+    """Return a fixed-size VideoClip for one script scene.
+
+    - MP4 assets are trimmed or looped to match *duration*.
+    - Image assets get a smooth Ken Burns zoom-in effect so the video
+      does not look static.
+    - If no valid asset is available a black fallback clip is returned.
+    """
+    if not asset_path or not os.path.exists(asset_path):
+        return ColorClip(size=VIDEO_RES, color=(0, 0, 0), duration=duration)
+
+    ext = os.path.splitext(asset_path)[1].lower()
+
+    if ext == ".mp4":
+        clip = VideoFileClip(asset_path)
+        if clip.duration >= duration:
+            clip = clip.subclip(0, duration)
+        else:
+            clip = clip.fx(vfx.loop, duration=duration)
+        return clip
+
+    # Static image – Ken Burns zoom-in (scale 1.0 → 1.15 over the clip)
+    img_clip = (
+        ImageClip(asset_path, duration=duration)
+        .resize(lambda t: 1.0 + 0.15 * t / max(duration, 0.001))
+        .set_position("center")
+    )
+    return CompositeVideoClip([img_clip], size=VIDEO_RES).set_duration(duration)
+
 
 async def main():
     print("🚀 Iniciando PyNarrator...")
+
     # 1. Leer guion
     with open("script.json", "r", encoding="utf-8") as f:
         script = json.load(f)
-    
+
+    # 2. Generar voces argentinas
     print("🎙️ Generando voces argentinas...")
-    # Aquí llamaremos a las funciones que Copilot completará
-    
-    print("✅ Proceso finalizado.")
+    narrator = ArgentineNarrator()
+    voice_data = await narrator.generate_voice_overs(script)
+
+    # 3. Descargar y procesar assets visuales
+    print("🖼️  Descargando assets visuales...")
+    visual_assets = get_visual_assets(script)
+
+    # 4. Crear clips de video (uno por escena)
+    if len(voice_data) != len(visual_assets):
+        print(
+            f"⚠️  Advertencia: se generaron {len(voice_data)} fragmentos de audio "
+            f"pero {len(visual_assets)} assets visuales. Se usarán {min(len(voice_data), len(visual_assets))} escenas."
+        )
+
+    print("🎬 Montando video...")
+    scene_clips = []
+    total = len(voice_data)
+    for i, (data, asset_path) in enumerate(zip(voice_data, visual_assets), start=1):
+        print(f"   [{i}/{total}] Procesando: {data['texto'][:50]}...")
+        clip = _make_clip_for_scene(asset_path, data["duracion"])
+        scene_clips.append(clip)
+
+    # 5. Concatenar todas las escenas
+    print("🔗 Concatenando escenas...")
+    video = concatenate_videoclips(scene_clips, method="compose")
+
+    # 6. Generar subtítulos con Whisper
+    print("📝 Generando subtítulos con Whisper...")
+    audio_path = os.path.join(AUDIO_DIR, "final_voice.mp3")
+    subtitle_clips = generate_subtitles(audio_path)
+
+    # 7. Superponer subtítulos sobre el video
+    print("✍️  Superponiendo subtítulos...")
+    final_video = CompositeVideoClip([video] + subtitle_clips, size=VIDEO_RES)
+
+    # 8. Añadir pista de audio final
+    print("🔊 Añadiendo audio final...")
+    audio = AudioFileClip(audio_path)
+    final_video = final_video.set_audio(audio)
+
+    # 9. Exportar
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"💾 Exportando a {OUTPUT_PATH}...")
+    final_video.write_videofile(
+        OUTPUT_PATH,
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        audio_bitrate="192k",
+        ffmpeg_params=["-profile:v", "high"],
+        verbose=False,
+        logger="bar",
+    )
+
+    # 10. Liberar memoria RAM
+    print("🧹 Liberando recursos...")
+    for clip in scene_clips:
+        clip.close()
+    for clip in subtitle_clips:
+        clip.close()
+    video.close()
+    final_video.close()
+    audio.close()
+
+    print("✅ ¡Video exportado exitosamente!")
+    print(f"   📁 Ubicación: {OUTPUT_PATH}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
