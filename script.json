@@ -1,12 +1,17 @@
 [
   {
     "voz": "H",
-    "texto": "Che, bienvenidos a PyNarrator.",
-    "keyword": "tecnología argentina"
+    "texto": "Che, ¿viste lo que armamos en un ratito? Un generador de videos automático.",
+    "keyword": "artificial intelligence robot"
   },
   {
     "voz": "M",
-    "texto": "Hoy vamos a automatizar videos gratis.",
-    "keyword": "coding laptop"
+    "texto": "¡Es una locura! Y lo mejor es que las voces suenan re argentinas, nada de ese acento neutro aburrido.",
+    "keyword": "buenos aires city"
+  },
+  {
+    "voz": "H",
+    "texto": "Totalmente. Ahora solo queda meterle banda de contenido y empezar a subir shorts a lo loco.",
+    "keyword": "success celebration"
   }
 ]
