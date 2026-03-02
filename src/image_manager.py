@@ -206,7 +206,7 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("processing failed for local source '%s': %s", source, exc)
                 else:
-                    logger.warning("local source file not found: %s", source)
+                    logger.info("local source file not found: '%s'. Falling back to keyword search.", source)
             # If source was provided but failed, fall through to keyword search
 
         # --- Keyword-based Pexels search (used when source is absent) -----------
