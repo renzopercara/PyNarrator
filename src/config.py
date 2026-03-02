@@ -13,6 +13,7 @@ ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 AUDIO_DIR = os.path.join(ASSETS_DIR, "audio")
 IMAGES_DIR = os.path.join(ASSETS_DIR, "images")
 MUSIC_DIR = os.path.join(ASSETS_DIR, "music")
+SFX_DIR = os.path.join(ASSETS_DIR, "sfx")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # Configuración de Voces (Microsoft Edge TTS - Argentina)

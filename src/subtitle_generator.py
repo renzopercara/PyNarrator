@@ -277,7 +277,10 @@ def _make_segment_highlight_clip(
     )
 
 
-def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
+def generate_subtitles(
+    audio_path: str = _AUDIO_PATH,
+    return_segment_times: bool = False,
+):
     """Generate word-level subtitle clips from *audio_path* using Whisper.
 
     Loads the Whisper 'base' model, transcribes the audio with
@@ -294,15 +297,24 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
     Args:
         audio_path: Path to the MP3 audio file to transcribe.
                     Defaults to ``assets/audio/final_voice.mp3``.
+        return_segment_times: When ``True`` also return a list of floats
+                    representing the start time (in seconds) of the first word
+                    in each Whisper segment.  Useful for placing SFX cues.
 
     Returns:
-        A list of :class:`moviepy.editor.ImageClip` objects, one per word,
-        with start time, duration, and position already set.
+        When *return_segment_times* is ``False`` (default): a list of
+        :class:`moviepy.editor.ImageClip` objects, one per word, with start
+        time, duration, and position already set.
+
+        When *return_segment_times* is ``True``: a tuple
+        ``(clips, segment_start_times)`` where *segment_start_times* is a
+        ``list[float]``.
     """
     model = whisper.load_model("base")
     result = model.transcribe(audio_path, word_timestamps=True)
 
     clips: list = []
+    segment_start_times: list[float] = []
     first_word_overall = True
 
     for segment in result.get("segments", []):
@@ -313,6 +325,9 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
         ]
         if not seg_word_infos:
             continue
+
+        # Record the start time of the first word in the segment.
+        segment_start_times.append(seg_word_infos[0].get("start", 0.0))
 
         # Clean all words in the segment, capitalising only the very first
         # word of the whole transcription.
@@ -336,4 +351,6 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
                 _make_segment_highlight_clip(seg_clean, idx, start, duration)
             )
 
+    if return_segment_times:
+        return clips, segment_start_times
     return clips
