@@ -3,6 +3,10 @@ import asyncio
 import logging
 import os
 
+import PIL.Image
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+
 from src.narrator import ArgentineNarrator
 from src.image_manager import get_visual_assets
 from src.subtitle_generator import generate_subtitles
