@@ -1,7 +1,10 @@
+import logging
 import os
 import requests
 from PIL import Image
 from src.config import IMAGES_DIR, PEXELS_API_KEY, VIDEO_RES
+
+logger = logging.getLogger(__name__)
 
 _PEXELS_HEADERS = {"Authorization": PEXELS_API_KEY} if PEXELS_API_KEY else {}
 _TARGET_W, _TARGET_H = VIDEO_RES  # 1080 x 1920
@@ -151,7 +154,7 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
                     results.append(out_path)
                     continue
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[image_manager] Warning: video processing failed for '{keyword}': {exc}")
+                    logger.warning("video processing failed for '%s': %s", keyword, exc)
                     if os.path.exists(raw_path):
                         os.remove(raw_path)
 
@@ -167,7 +170,7 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
                     results.append(out_path)
                     continue
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[image_manager] Warning: image processing failed for '{keyword}': {exc}")
+                    logger.warning("image processing failed for '%s': %s", keyword, exc)
                     if os.path.exists(raw_path):
                         os.remove(raw_path)
 
