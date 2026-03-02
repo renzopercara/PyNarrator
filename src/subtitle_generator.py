@@ -12,8 +12,9 @@ _AUDIO_PATH = os.path.join(AUDIO_DIR, "final_voice.mp3")
 _VIDEO_WIDTH, _VIDEO_HEIGHT = VIDEO_RES  # width x height (1080 x 1920)
 
 _FONTSIZE = 70
-_TEXT_COLOR = (255, 255, 0, 255)    # yellow, fully opaque
-_STROKE_COLOR = (0, 0, 0, 255)      # black, fully opaque
+_TEXT_COLOR = (255, 255, 0, 255)        # yellow, fully opaque
+_HIGHLIGHT_COLOR = (255, 165, 0, 255)   # orange #FFA500, for the current word
+_STROKE_COLOR = (0, 0, 0, 255)          # black, fully opaque
 _STROKE_WIDTH = 3
 _Y_POSITION = int(_VIDEO_HEIGHT * 0.80)
 
@@ -152,15 +153,95 @@ def _make_text_clip(word: str, start: float, duration: float) -> ImageClip:
     )
 
 
+def _make_segment_highlight_clip(
+    segment_words: list,
+    current_idx: int,
+    start: float,
+    duration: float,
+) -> ImageClip:
+    """Render all *segment_words* on a single subtitle line.
+
+    The word at *current_idx* is drawn in orange (#FFA500); all other words
+    are drawn in yellow.  This produces a karaoke-style highlight effect
+    where the currently-spoken word stands out from the rest of the line.
+
+    If the total line width exceeds the video width the font is scaled down
+    proportionally so everything fits on one row.
+
+    Args:
+        segment_words: All cleaned words that belong to the current segment.
+        current_idx:   Index of the word that is being spoken right now.
+        start:         Clip start time in seconds.
+        duration:      Clip duration in seconds.
+
+    Returns:
+        A positioned :class:`~moviepy.editor.ImageClip` ready to overlay on
+        the video composition.
+    """
+    if not segment_words:
+        return _make_text_clip("", start, duration)
+
+    # Add a trailing space to every token except the last so words are
+    # separated naturally when rendered side-by-side.
+    tokens = [w + " " for w in segment_words[:-1]] + [segment_words[-1]]
+
+    font = _FONT
+
+    def _measure_tokens(f):
+        bboxes = [
+            _MEASURE_DRAW.textbbox((0, 0), t, font=f, stroke_width=_STROKE_WIDTH)
+            for t in tokens
+        ]
+        total_w = sum(b[2] - b[0] for b in bboxes) + _STROKE_WIDTH * 2
+        max_h = max(b[3] - b[1] for b in bboxes) + _STROKE_WIDTH * 2
+        return bboxes, total_w, max_h
+
+    bboxes, total_w, max_h = _measure_tokens(font)
+
+    # Scale font down if the line would overflow the video frame
+    if total_w > _VIDEO_WIDTH - 40:
+        scale_factor = (_VIDEO_WIDTH - 40) / total_w
+        scaled_size = max(int(_FONTSIZE * scale_factor), 20)
+        font = _load_font(scaled_size)
+        bboxes, total_w, max_h = _measure_tokens(font)
+
+    img = Image.new("RGBA", (total_w, max_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    x = _STROKE_WIDTH
+    y = _STROKE_WIDTH
+    for i, (token, bbox) in enumerate(zip(tokens, bboxes)):
+        color = _HIGHLIGHT_COLOR if i == current_idx else _TEXT_COLOR
+        draw.text(
+            (x - bbox[0], y - bbox[1]),
+            token,
+            font=font,
+            fill=color,
+            stroke_width=_STROKE_WIDTH,
+            stroke_fill=_STROKE_COLOR,
+        )
+        x += bbox[2] - bbox[0]
+
+    return (
+        ImageClip(np.array(img), ismask=False)
+        .set_start(start)
+        .set_duration(duration)
+        .set_position(("center", _Y_POSITION))
+    )
+
+
 def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
     """Generate word-level subtitle clips from *audio_path* using Whisper.
 
     Loads the Whisper 'base' model, transcribes the audio with
-    ``word_timestamps=True``, and converts each word into a Pillow-rendered
-    :class:`moviepy.editor.ImageClip` ready to be overlaid on the final
-    video composition.  This approach does **not** require ImageMagick,
-    avoiding the ``OSError: Invalid Parameter`` that occurs on Windows when
-    MoviePy's ``TextClip`` tries to invoke ImageMagick.
+    ``word_timestamps=True``, and for each word produces a Pillow-rendered
+    :class:`moviepy.editor.ImageClip` that shows **all words in the segment**
+    with the currently-spoken word highlighted in orange (#FFA500) and the
+    remaining words in yellow – a karaoke-style subtitle effect.
+
+    This approach does **not** require ImageMagick, avoiding the
+    ``OSError: Invalid Parameter`` that occurs on Windows when MoviePy's
+    ``TextClip`` tries to invoke ImageMagick.
 
     Args:
         audio_path: Path to the MP3 audio file to transcribe.
@@ -174,18 +255,37 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
     result = model.transcribe(audio_path, word_timestamps=True)
 
     clips: list = []
+    first_word_overall = True
+
     for segment in result.get("segments", []):
-        for word_info in segment.get("words", []):
-            word = word_info.get("word", "").strip()
+        # Collect valid word infos for this segment
+        seg_word_infos = [
+            wi for wi in segment.get("words", [])
+            if wi.get("word", "").strip()
+        ]
+        if not seg_word_infos:
+            continue
+
+        # Clean all words in the segment, capitalising only the very first
+        # word of the whole transcription.
+        seg_clean: list[str] = []
+        for j, word_info in enumerate(seg_word_infos):
+            is_first = first_word_overall and j == 0
+            cleaned = clean_word(word_info["word"].strip(), is_first=is_first)
+            seg_clean.append(cleaned)
+
+        if first_word_overall and seg_clean:
+            first_word_overall = False
+
+        # Create one clip per word – the clip renders the full segment line
+        # with the current word highlighted in orange.
+        for idx, (word_info, _) in enumerate(zip(seg_word_infos, seg_clean)):
             start = word_info.get("start", 0.0)
             end = word_info.get("end", 0.0)
             duration = max(end - start, 0.05)  # minimum 50 ms so the clip is visible
 
-            if not word:
-                continue
-
-            is_first = len(clips) == 0
-            word = clean_word(word, is_first=is_first)
-            clips.append(_make_text_clip(word, start, duration))
+            clips.append(
+                _make_segment_highlight_clip(seg_clean, idx, start, duration)
+            )
 
     return clips

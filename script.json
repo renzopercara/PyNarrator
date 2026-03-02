@@ -1,19 +1,18 @@
 [
   {
     "voz": "H",
-    "texto": "Che, ¿viste lo que armamos en un ratito? Un generador de videos automático.",
-    "source": "https://images.pexels.com/photos/3861969/pexels-photo-3861969.jpeg",
-    "keyword": "artificial intelligence robot"
+    "texto": "Bienvenidos a mi canal. Hoy vamos a ver cómo automatizar videos con Python.",
+    "keyword": "tecnología futurista",
+    "source": "https://images.pexels.com/photos/3183150/pexels-photo-3183150.jpeg"
   },
   {
     "voz": "M",
-    "texto": "¡Es una locura! Y lo mejor es que las voces suenan re argentinas, nada de ese acento neutro aburrido.",
-    "source": "assets/mifoto.jpg",
-    "keyword": "buenos aires city"
+    "texto": "Es increíble cómo el código puede crear contenido de calidad sin esfuerzo.",
+    "keyword": "laptop coding forest"
   },
   {
     "voz": "H",
-    "texto": "Totalmente. Ahora solo queda meterle banda de contenido y empezar a subir shorts a lo loco.",
-    "keyword": "success celebration"
+    "texto": "Si te gusta este contenido, no te olvides de darle like y suscribirte.",
+    "keyword": "social media like button"
   }
 ]
