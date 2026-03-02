@@ -6,6 +6,48 @@ from src.config import IMAGES_DIR, PEXELS_API_KEY, VIDEO_RES
 
 logger = logging.getLogger(__name__)
 
+# Tone-specific descriptors appended when generating keyword variants.
+_TONE_DESCRIPTORS: dict[str, list[str]] = {
+    "ENERGICO": ["action", "dynamic", "powerful", "energy"],
+    "INFORMATIVO": ["professional", "business", "modern", "technology"],
+    "RELAJADO": ["calm", "peaceful", "nature", "serene"],
+}
+
+
+def _generate_keyword_variants(keyword: str, tone: str = "INFORMATIVO") -> list[str]:
+    """Return up to 3 search-query variants derived from *keyword*.
+
+    Variant 1: original keyword.
+    Variant 2: first meaningful word of the keyword (for broader reach).
+    Variant 3: original keyword plus a tone-appropriate English descriptor.
+
+    Duplicates are removed and the list is capped at 3 entries.
+    """
+    variants: list[str] = [keyword]
+
+    # Second variant: broadest single meaningful word
+    words = [w for w in keyword.split() if len(w) > 3]
+    if words and words[0] != keyword:
+        variants.append(words[0])
+
+    # Third variant: keyword + tone descriptor (first one)
+    descriptors = _TONE_DESCRIPTORS.get(tone, _TONE_DESCRIPTORS["INFORMATIVO"])
+    extended = f"{keyword} {descriptors[0]}"
+    if extended not in variants:
+        variants.append(extended)
+
+    # Deduplicate preserving order and cap at 3
+    seen: set[str] = set()
+    result: list[str] = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+        if len(result) == 3:
+            break
+    return result
+
+
 _PEXELS_HEADERS = {"Authorization": PEXELS_API_KEY} if PEXELS_API_KEY else {}
 _TARGET_W, _TARGET_H = VIDEO_RES  # 1080 x 1920
 
@@ -151,7 +193,7 @@ def process_visual_asset(asset_path: str, output_path: str) -> str:
     return output_path
 
 
-def get_visual_assets(script_data: list[dict]) -> list[str]:
+def get_visual_assets(script_data: list[dict], tone: str = "INFORMATIVO") -> list[str]:
     """Download and process one visual asset per item in *script_data*.
 
     Each item may optionally contain a ``"source"`` key:
@@ -160,11 +202,18 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
       from that address and resized/cropped to 1080×1920.
     - **Local path** (e.g. ``assets/mifoto.jpg``): that file is used directly
       and resized/cropped to 1080×1920.
-    - **Absent / empty**: the existing Pexels keyword-search logic is used
-      (tries a portrait video first, then a photo).
+    - **Absent / empty**: up to 3 keyword variants (derived from the item's
+      ``"keyword"`` field and the overall *tone*) are tried against Pexels.
+      For each variant a portrait **video** is searched first; only if no
+      video is found does the search fall back to a photo.
 
     Files are saved under *IMAGES_DIR* as ``01_visual.mp4`` / ``01_visual.jpg``
     (numbered in script order).
+
+    Args:
+        script_data: List of scene dicts from ``script.json``.
+        tone:        Overall script tone (``"ENERGICO"``, ``"INFORMATIVO"``,
+                     or ``"RELAJADO"``).  Used to generate keyword variants.
 
     Returns a list of absolute paths to the processed files.
     """
@@ -215,9 +264,15 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
             results.append("")
             continue
 
-        # --- Try video first ---------------------------------------------------
-        video_url = _search_pexels_video(keyword)
-        if video_url:
+        # Generate up to 3 search variants and try each one in order.
+        # Priority: video (mp4) first across all variants, then photo fallback.
+        variants = _generate_keyword_variants(keyword, tone)
+
+        # --- Try video first across all variants ----------------------------------
+        for variant in variants:
+            video_url = _search_pexels_video(variant)
+            if not video_url:
+                continue
             raw_path = os.path.join(IMAGES_DIR, f"{prefix}_raw.mp4")
             out_path = os.path.join(IMAGES_DIR, f"{prefix}.mp4")
             if _download_file(video_url, raw_path):
@@ -225,30 +280,32 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
                     process_visual_asset(raw_path, out_path)
                     os.remove(raw_path)
                     results.append(out_path)
-                    continue
+                    break
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("video processing failed for '%s': %s", keyword, exc)
+                    logger.warning("video processing failed for '%s': %s", variant, exc)
                     if os.path.exists(raw_path):
                         os.remove(raw_path)
-
-        # --- Fallback: photo ---------------------------------------------------
-        image_url = _search_pexels_image(keyword)
-        if image_url:
-            raw_path = os.path.join(IMAGES_DIR, f"{prefix}_raw.jpg")
-            out_path = os.path.join(IMAGES_DIR, f"{prefix}.jpg")
-            if _download_file(image_url, raw_path):
-                try:
-                    process_visual_asset(raw_path, out_path)
-                    os.remove(raw_path)
-                    results.append(out_path)
+        else:
+            # --- Fallback: photo (try each variant) -----------------------------------
+            for variant in variants:
+                image_url = _search_pexels_image(variant)
+                if not image_url:
                     continue
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("image processing failed for '%s': %s", keyword, exc)
-                    if os.path.exists(raw_path):
+                raw_path = os.path.join(IMAGES_DIR, f"{prefix}_raw.jpg")
+                out_path = os.path.join(IMAGES_DIR, f"{prefix}.jpg")
+                if _download_file(image_url, raw_path):
+                    try:
+                        process_visual_asset(raw_path, out_path)
                         os.remove(raw_path)
-
-        # --- Nothing found or download failed ----------------------------------
-        results.append("")
+                        results.append(out_path)
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("image processing failed for '%s': %s", variant, exc)
+                        if os.path.exists(raw_path):
+                            os.remove(raw_path)
+            else:
+                # --- Nothing found or download failed ----------------------------
+                results.append("")
 
     return results
 

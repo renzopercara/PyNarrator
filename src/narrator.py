@@ -4,17 +4,37 @@ from moviepy.editor import concatenate_audioclips, AudioFileClip
 import os
 from src.config import VOICES, AUDIO_DIR
 
+# Voice rate adjustments per tone (edge-tts rate string format)
+_TONE_VOICE_RATE: dict[str, str] = {
+    "ENERGICO": "+20%",     # faster, higher energy
+    "INFORMATIVO": "+0%",   # neutral default
+    "RELAJADO": "-15%",     # slower, calmer
+}
+
+# Voice pitch adjustments per tone
+_TONE_VOICE_PITCH: dict[str, str] = {
+    "ENERGICO": "+5Hz",
+    "INFORMATIVO": "+0Hz",
+    "RELAJADO": "-5Hz",
+}
+
 
 class ArgentineNarrator:
     def __init__(self):
         os.makedirs(AUDIO_DIR, exist_ok=True)
 
-    async def generate_voice_overs(self, script_data):
+    async def generate_voice_overs(self, script_data, tone: str = "INFORMATIVO"):
         """Generate voice-overs for each item in script_data using edge-tts.
 
         For every element the method picks the Argentine voice (H = male,
-        M = female) defined in VOICES, synthesises an MP3 fragment, then
-        concatenates all fragments into a single final_voice.mp3.
+        M = female) defined in VOICES, synthesises an MP3 fragment using the
+        rate and pitch corresponding to *tone*, then concatenates all fragments
+        into a single final_voice.mp3.
+
+        Args:
+            script_data: List of scene dicts from ``script.json``.
+            tone:        Overall script tone (``"ENERGICO"``, ``"INFORMATIVO"``,
+                         or ``"RELAJADO"``).  Drives voice rate and pitch.
 
         Returns:
             list[dict]: Each dict contains:
@@ -29,6 +49,8 @@ class ArgentineNarrator:
         temp_files = []
         try:
             # --- 1. Synthesise one MP3 per line ---------------------------------
+            rate = _TONE_VOICE_RATE.get(tone, "+0%")
+            pitch = _TONE_VOICE_PITCH.get(tone, "+0Hz")
             for idx, item in enumerate(script_data):
                 text = item.get("texto", "").strip()
                 if not text:
@@ -39,7 +61,7 @@ class ArgentineNarrator:
                 voice_name = VOICES.get(voice_key, VOICES["H"])
                 temp_path = os.path.join(AUDIO_DIR, f"fragment_{idx:04d}.mp3")
 
-                communicate = edge_tts.Communicate(text=text, voice=voice_name)
+                communicate = edge_tts.Communicate(text=text, voice=voice_name, rate=rate, pitch=pitch)
                 await communicate.save(temp_path)
                 temp_files.append(temp_path)
 

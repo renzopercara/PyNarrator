@@ -16,7 +16,8 @@ _TEXT_COLOR = (255, 255, 0, 255)        # yellow, fully opaque
 _HIGHLIGHT_COLOR = (255, 165, 0, 255)   # orange #FFA500, for the current word
 _STROKE_COLOR = (0, 0, 0, 255)          # black, fully opaque
 _STROKE_WIDTH = 3
-_Y_POSITION = int(_VIDEO_HEIGHT * 0.80)
+_Y_POSITION = int(_VIDEO_HEIGHT * 0.80)          # default (ENERGICO / RELAJADO)
+_Y_POSITION_INFORMATIVO = int(_VIDEO_HEIGHT * 0.88)  # pinned low for INFORMATIVO
 
 # TrueType font search order: Windows → Linux → macOS → built-in fallback
 _FONT_CANDIDATES = [
@@ -122,7 +123,7 @@ def clean_word(word: str, is_first: bool = False) -> str:
     return leading_punct + corrected_core + trailing_punct
 
 
-def _make_text_clip(word: str, start: float, duration: float) -> ImageClip:
+def _make_text_clip(word: str, start: float, duration: float, y_pos: int = _Y_POSITION) -> "ImageClip":
     """Render *word* as a Pillow RGBA image and wrap it in an ImageClip.
 
     The image has a transparent background with yellow text and a black
@@ -149,7 +150,7 @@ def _make_text_clip(word: str, start: float, duration: float) -> ImageClip:
         ImageClip(np.array(img), ismask=False)
         .set_start(start)
         .set_duration(duration)
-        .set_position(("center", _Y_POSITION))
+        .set_position(("center", y_pos))
     )
 
 
@@ -158,7 +159,8 @@ def _make_segment_highlight_clip(
     current_idx: int,
     start: float,
     duration: float,
-) -> ImageClip:
+    y_pos: int = _Y_POSITION,
+) -> "ImageClip":
     """Render all *segment_words* on a single subtitle line.
 
     The word at *current_idx* is drawn in orange (#FFA500); all other words
@@ -179,7 +181,7 @@ def _make_segment_highlight_clip(
         the video composition.
     """
     if not segment_words:
-        return _make_text_clip("", start, duration)
+        return _make_text_clip("", start, duration, y_pos)
 
     # Add a trailing space to every token except the last so words are
     # separated naturally when rendered side-by-side.
@@ -226,11 +228,11 @@ def _make_segment_highlight_clip(
         ImageClip(np.array(img), ismask=False)
         .set_start(start)
         .set_duration(duration)
-        .set_position(("center", _Y_POSITION))
+        .set_position(("center", y_pos))
     )
 
 
-def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
+def generate_subtitles(audio_path: str = _AUDIO_PATH, tone: str = "INFORMATIVO") -> list:
     """Generate word-level subtitle clips from *audio_path* using Whisper.
 
     Loads the Whisper 'base' model, transcribes the audio with
@@ -239,6 +241,10 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
     with the currently-spoken word highlighted in orange (#FFA500) and the
     remaining words in yellow – a karaoke-style subtitle effect.
 
+    For ``tone="INFORMATIVO"`` subtitles are pinned closer to the bottom of
+    the frame (88 % of frame height) for a clean, consistent look.  For all
+    other tones the default position (80 % of frame height) is used.
+
     This approach does **not** require ImageMagick, avoiding the
     ``OSError: Invalid Parameter`` that occurs on Windows when MoviePy's
     ``TextClip`` tries to invoke ImageMagick.
@@ -246,11 +252,13 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
     Args:
         audio_path: Path to the MP3 audio file to transcribe.
                     Defaults to ``assets/audio/final_voice.mp3``.
+        tone:       Overall script tone. ``"INFORMATIVO"`` pins subtitles lower.
 
     Returns:
         A list of :class:`moviepy.editor.ImageClip` objects, one per word,
         with start time, duration, and position already set.
     """
+    y_pos = _Y_POSITION_INFORMATIVO if tone == "INFORMATIVO" else _Y_POSITION
     model = whisper.load_model("base")
     result = model.transcribe(audio_path, word_timestamps=True)
 
@@ -285,7 +293,7 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
             duration = max(end - start, 0.05)  # minimum 50 ms so the clip is visible
 
             clips.append(
-                _make_segment_highlight_clip(seg_clean, idx, start, duration)
+                _make_segment_highlight_clip(seg_clean, idx, start, duration, y_pos)
             )
 
     return clips
