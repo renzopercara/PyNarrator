@@ -6,7 +6,7 @@ import os
 from src.narrator import ArgentineNarrator
 from src.image_manager import get_visual_assets
 from src.subtitle_generator import generate_subtitles
-from src.config import OUTPUT_DIR, AUDIO_DIR, VIDEO_RES
+from src.config import OUTPUT_DIR, AUDIO_DIR, VIDEO_RES, LOGO_PATH
 
 from moviepy.editor import (
     VideoFileClip,
@@ -74,6 +74,7 @@ async def main():
     video = None
     final_video = None
     audio = None
+    watermark = None
 
     try:
         # 1. Leer guion
@@ -121,12 +122,26 @@ async def main():
         logger.info("✍️  Superponiendo subtítulos...")
         final_video = CompositeVideoClip([video] + subtitle_clips, size=VIDEO_RES)
 
-        # 8. Añadir pista de audio final
+        # 8. Añadir marca de agua (logo) en la esquina inferior derecha
+        if os.path.exists(LOGO_PATH):
+            logger.info("🏷️  Añadiendo marca de agua...")
+            watermark = (
+                ImageClip(LOGO_PATH)
+                .resize(width=200)
+                .set_opacity(0.7)
+                .set_duration(final_video.duration)
+                .set_position(("right", "bottom"))
+            )
+            final_video = CompositeVideoClip([final_video, watermark], size=VIDEO_RES)
+        else:
+            logger.warning("Logo no encontrado en %s. Se omite la marca de agua.", LOGO_PATH)
+
+        # 9. Añadir pista de audio final
         logger.info("🔊 Añadiendo audio final...")
         audio = AudioFileClip(audio_path)
         final_video = final_video.set_audio(audio)
 
-        # 9. Exportar
+        # 10. Exportar
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         total_duration = final_video.duration
         print(
@@ -149,7 +164,7 @@ async def main():
         logger.info("   📁 Ubicación: %s", OUTPUT_PATH)
 
     finally:
-        # 10. Liberar memoria RAM – always runs to prevent memory leaks
+        # 11. Liberar memoria RAM – always runs to prevent memory leaks
         logger.info("🧹 Liberando recursos...")
         for clip in scene_clips:
             clip.close()
@@ -161,6 +176,8 @@ async def main():
             final_video.close()
         if audio is not None:
             audio.close()
+        if watermark is not None:
+            watermark.close()
 
 
 if __name__ == "__main__":

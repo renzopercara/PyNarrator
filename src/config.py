@@ -20,6 +20,9 @@ VOICES = {
     "M": "es-AR-ElenaNeural"
 }
 
+# Marca de Agua
+LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.png")
+
 # Configuración de Video
 VIDEO_RES = (1080, 1920)  # Formato Vertical (TikTok/Reels)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
