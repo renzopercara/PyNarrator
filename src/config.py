@@ -16,7 +16,7 @@ MUSIC_DIR = os.path.join(ASSETS_DIR, "music")
 MUSIC_FAST_DIR = os.path.join(MUSIC_DIR, "fast")       # Upbeat, Rock, Electrónica
 MUSIC_SLOW_DIR = os.path.join(MUSIC_DIR, "slow")       # Lo-Fi, Piano, Chill
 MUSIC_CORPORATE_DIR = os.path.join(MUSIC_DIR, "corporate")  # Clean corporate/tutorial
-SFX_DIR = os.path.join(ASSETS_DIR, "sfx")             # Sound effects (pop, transition…)
+SFX_DIR = os.path.join(ASSETS_DIR, "sfx")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # Configuración de Voces (Microsoft Edge TTS - Argentina)

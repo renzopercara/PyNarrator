@@ -47,7 +47,6 @@ def _generate_keyword_variants(keyword: str, tone: str = "INFORMATIVO") -> list[
             break
     return result
 
-
 _PEXELS_HEADERS = {"Authorization": PEXELS_API_KEY} if PEXELS_API_KEY else {}
 _TARGET_W, _TARGET_H = VIDEO_RES  # 1080 x 1920
 
@@ -286,7 +285,7 @@ def get_visual_assets(script_data: list[dict], tone: str = "INFORMATIVO") -> lis
                     if os.path.exists(raw_path):
                         os.remove(raw_path)
         else:
-            # --- Fallback: photo (try each variant) -----------------------------------
+            # No video found – try photos across all variants
             for variant in variants:
                 image_url = _search_pexels_image(variant)
                 if not image_url:
