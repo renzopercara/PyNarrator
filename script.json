@@ -2,11 +2,13 @@
   {
     "voz": "H",
     "texto": "Che, ¿viste lo que armamos en un ratito? Un generador de videos automático.",
+    "source": "https://images.pexels.com/photos/3861969/pexels-photo-3861969.jpeg",
     "keyword": "artificial intelligence robot"
   },
   {
     "voz": "M",
     "texto": "¡Es una locura! Y lo mejor es que las voces suenan re argentinas, nada de ese acento neutro aburrido.",
+    "source": "assets/mifoto.jpg",
     "keyword": "buenos aires city"
   },
   {

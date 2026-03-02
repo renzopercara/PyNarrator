@@ -9,6 +9,36 @@ logger = logging.getLogger(__name__)
 _PEXELS_HEADERS = {"Authorization": PEXELS_API_KEY} if PEXELS_API_KEY else {}
 _TARGET_W, _TARGET_H = VIDEO_RES  # 1080 x 1920
 
+_CONTENT_TYPE_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+
+
+def _resolve_url_extension(url: str) -> str:
+    """Return the file extension for *url*, falling back to a HEAD request.
+
+    First tries to derive the extension from the URL path. If the path has
+    no recognisable extension, a lightweight HEAD request is made to read the
+    ``Content-Type`` header.  Defaults to ``.jpg`` when nothing else works.
+    """
+    url_path = url.split("?")[0]
+    ext = os.path.splitext(url_path)[1].lower()
+    if ext in _CONTENT_TYPE_TO_EXT.values():
+        return ext
+    # No extension in URL path – ask the server
+    try:
+        resp = requests.head(url, timeout=10, allow_redirects=True)
+        content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        return _CONTENT_TYPE_TO_EXT.get(content_type, ".jpg")
+    except requests.RequestException:
+        return ".jpg"
+
 
 def _search_pexels_video(keyword: str) -> str | None:
     """Return the URL of the first portrait/square short-video clip or None."""
@@ -122,10 +152,17 @@ def process_visual_asset(asset_path: str, output_path: str) -> str:
 
 
 def get_visual_assets(script_data: list[dict]) -> list[str]:
-    """Download and process one visual asset per keyword in *script_data*.
+    """Download and process one visual asset per item in *script_data*.
 
-    For each item the function tries to find a short portrait video from
-    Pexels first; if none is found it falls back to a high-resolution image.
+    Each item may optionally contain a ``"source"`` key:
+
+    - **URL** (starts with ``http://`` or ``https://``): the file is downloaded
+      from that address and resized/cropped to 1080×1920.
+    - **Local path** (e.g. ``assets/mifoto.jpg``): that file is used directly
+      and resized/cropped to 1080×1920.
+    - **Absent / empty**: the existing Pexels keyword-search logic is used
+      (tries a portrait video first, then a photo).
+
     Files are saved under *IMAGES_DIR* as ``01_visual.mp4`` / ``01_visual.jpg``
     (numbered in script order).
 
@@ -135,12 +172,48 @@ def get_visual_assets(script_data: list[dict]) -> list[str]:
     results: list[str] = []
 
     for idx, item in enumerate(script_data, start=1):
+        prefix = f"{idx:02d}_visual"
+        source = item.get("source", "").strip()
+
+        # --- Explicit source (URL or local path) --------------------------------
+        if source:
+            if source.startswith("http://") or source.startswith("https://"):
+                # Derive extension from URL path; fall back to Content-Type header
+                ext = _resolve_url_extension(source)
+                raw_path = os.path.join(IMAGES_DIR, f"{prefix}_raw{ext}")
+                out_path = os.path.join(IMAGES_DIR, f"{prefix}{ext}")
+                if _download_file(source, raw_path):
+                    try:
+                        process_visual_asset(raw_path, out_path)
+                        os.remove(raw_path)
+                        results.append(out_path)
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("processing failed for source URL '%s': %s", source, exc)
+                        if os.path.exists(raw_path):
+                            os.remove(raw_path)
+                else:
+                    logger.warning("failed to download source URL: %s", source)
+            else:
+                # Local file path
+                if os.path.exists(source):
+                    ext = os.path.splitext(source)[1].lower()
+                    out_path = os.path.join(IMAGES_DIR, f"{prefix}{ext}")
+                    try:
+                        process_visual_asset(source, out_path)
+                        results.append(out_path)
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("processing failed for local source '%s': %s", source, exc)
+                else:
+                    logger.warning("local source file not found: %s", source)
+            # If source was provided but failed, fall through to keyword search
+
+        # --- Keyword-based Pexels search (used when source is absent) -----------
         keyword = item.get("keyword", "").strip()
         if not keyword:
             results.append("")
             continue
-
-        prefix = f"{idx:02d}_visual"
 
         # --- Try video first ---------------------------------------------------
         video_url = _search_pexels_video(keyword)
