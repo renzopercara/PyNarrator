@@ -1,7 +1,9 @@
 import os
+import re
 
 import numpy as np
 import whisper
+from spellchecker import SpellChecker
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import ImageClip
 from src.config import AUDIO_DIR, VIDEO_RES
@@ -37,6 +39,86 @@ def _load_font(size: int) -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
 # Load font and reusable measurement context once at module level.
 _FONT = _load_font(_FONTSIZE)
 _MEASURE_DRAW = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+# ---------------------------------------------------------------------------
+# Text post-processing
+# ---------------------------------------------------------------------------
+
+# Manual corrections for common Spanish transcription errors produced by
+# Whisper / AI voices that run words together.  Keys are the malformed token
+# (lower-case); values are the corrected replacement string (may include a
+# space to split into two visible words on the same clip).
+_CORRECTIONS: dict[str, str] = {
+    "reargentinas": "muy argentinas",
+    "reargentina": "muy argentina",
+    "muiargentinas": "muy argentinas",
+    "muiargentina": "muy argentina",
+}
+
+# SpellChecker instance loaded once with the Spanish dictionary.
+_SPELL = SpellChecker(language="es")
+
+
+# Pre-compiled regex patterns for punctuation extraction in clean_word().
+_LEADING_PUNCT_RE = re.compile(r"^([^a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]*)")
+_TRAILING_PUNCT_RE = re.compile(r"([^a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]*)$")
+
+
+def clean_word(word: str, is_first: bool = False) -> str:
+    """Return a cleaned version of *word* ready for subtitle display.
+
+    Steps applied in order:
+
+    1. Strip surrounding punctuation/whitespace.
+    2. Look up the lower-cased token in the manual ``_CORRECTIONS`` dict.
+    3. If not found in corrections, use :class:`spellchecker.SpellChecker`
+       (Spanish) to check whether the word is known.  If unknown, replace it
+       with the best candidate returned by ``correction()``.  If no candidate
+       is found the original word is kept unchanged.
+    4. Capitalise the first character when *is_first* is ``True`` (start of
+       subtitle sequence).
+
+    Args:
+        word:     The raw token from Whisper.
+        is_first: When ``True`` the result will start with an upper-case letter.
+
+    Returns:
+        The cleaned word (or corrected phrase) as a string.
+    """
+    # 1. Normalise
+    cleaned = word.strip()
+    if not cleaned:
+        return cleaned
+
+    # Preserve leading/trailing punctuation so we can reattach it.
+    leading_punct = _LEADING_PUNCT_RE.match(cleaned).group(1)
+    trailing_punct = _TRAILING_PUNCT_RE.search(cleaned).group(1)
+    core = cleaned[len(leading_punct):len(cleaned) - len(trailing_punct)] if trailing_punct else cleaned[len(leading_punct):]
+
+    if not core:
+        return cleaned
+
+    lower_core = core.lower()
+
+    # 2. Manual corrections dict
+    if lower_core in _CORRECTIONS:
+        corrected_core = _CORRECTIONS[lower_core]
+    else:
+        # 3. Spell-checker: only attempt correction when the word is unknown.
+        # On a successful correction the lower-cased candidate is used; when
+        # no candidate is available the original casing of core is preserved.
+        unknown = _SPELL.unknown([lower_core])
+        if unknown:
+            candidate = _SPELL.correction(lower_core)
+            corrected_core = candidate if candidate else core
+        else:
+            corrected_core = core
+
+    # 4. Sentence capitalisation
+    if is_first:
+        corrected_core = corrected_core[0].upper() + corrected_core[1:]
+
+    return leading_punct + corrected_core + trailing_punct
 
 
 def _make_text_clip(word: str, start: float, duration: float) -> ImageClip:
@@ -102,6 +184,8 @@ def generate_subtitles(audio_path: str = _AUDIO_PATH) -> list:
             if not word:
                 continue
 
+            is_first = len(clips) == 0
+            word = clean_word(word, is_first=is_first)
             clips.append(_make_text_clip(word, start, duration))
 
     return clips
