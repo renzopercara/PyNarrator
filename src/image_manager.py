@@ -6,6 +6,9 @@ from src.config import IMAGES_DIR, PEXELS_API_KEY, VIDEO_RES
 
 logger = logging.getLogger(__name__)
 
+# Quality suffix appended to every Pexels search query for better asset selection
+_QUALITY_SUFFIX = "high resolution, professional photography, construction site"
+
 # Tone-specific descriptors appended when generating keyword variants.
 _TONE_DESCRIPTORS: dict[str, list[str]] = {
     "ENERGICO": ["action", "dynamic", "powerful", "energy"],
@@ -45,6 +48,9 @@ def _generate_keyword_variants(keyword: str, tone: str = "INFORMATIVO") -> list[
             result.append(v)
         if len(result) == 3:
             break
+
+    # Append quality suffix to every variant for better asset selection
+    result = [f"{v} {_QUALITY_SUFFIX}" for v in result]
     return result
 
 _PEXELS_HEADERS = {"Authorization": PEXELS_API_KEY} if PEXELS_API_KEY else {}
