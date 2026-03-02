@@ -47,45 +47,62 @@ _ZOOM_RATE_NORMAL = 0.02
 _ZOOM_RATE_ENERGICO = 0.05
 _WARM_FILTER_RGB = np.array([1.10, 1.00, 0.85], dtype=np.float32)
 
+# Font candidates shared by hook and CTA renderers
 _HOOK_FONT_CANDIDATES = [
     "C:/Windows/Fonts/arialbd.ttf",
     "C:/Windows/Fonts/arial.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
 ]
 
 def _load_hook_font(size: int):
+    """Return a TrueType font at *size* pt, falling back to the bitmap default."""
     for path in _HOOK_FONT_CANDIDATES:
         if os.path.exists(path):
             return PIL.ImageFont.truetype(path, size)
     return PIL.ImageFont.load_default()
 
 def _make_hook_clip(topic: str, duration: float = 2.5) -> ImageClip:
-    """Crea el título gancho inicial (Hook)"""
+    """Crea el título gancho inicial (Hook) con diseño mejorado"""
     strip_h = 160
     font = _load_hook_font(55)
     text = topic.upper()[:45]
+    
+    measure_draw = PIL.ImageDraw.Draw(PIL.Image.new("RGBA", (1, 1)))
+    bbox = measure_draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
     img = PIL.Image.new("RGBA", (VIDEO_W, strip_h), (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
     draw.rectangle([0, 0, VIDEO_W, strip_h], fill=(200, 0, 0, 220)) # Rojo vibrante
-    draw.text((50, 45), text, font=font, fill=(255, 255, 255, 255))
+    
+    x = max(0, (VIDEO_W - text_w) // 2)
+    y = max(0, (strip_h - text_h) // 2)
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+    
     return (ImageClip(np.array(img))
             .set_duration(duration)
             .set_position(("center", (VIDEO_H - strip_h) // 2))
             .crossfadeout(0.5))
 
 def _make_cta_clip(duration: float = 2.0) -> CompositeVideoClip:
-    """Placa de cierre con llamado a la acción"""
+    """Placa de cierre con llamado a la acción y zoom suave"""
     bg = ColorClip(size=VIDEO_RES, color=(0, 0, 0), duration=duration)
     cta_text = "¡SEGUINOS PARA MÁS!"
     font = _load_hook_font(70)
-    img = PIL.Image.new("RGBA", (800, 200), (0, 0, 0, 0))
+    
+    img = PIL.Image.new("RGBA", (800, 250), (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
-    draw.text((10, 10), cta_text, font=font, fill=(255, 255, 255, 255))
+    draw.text((10, 10), cta_text, font=font, fill=(255, 255, 255, 255), stroke_width=3, stroke_fill=(0,0,0))
+    
     text_clip = (ImageClip(np.array(img))
                  .set_duration(duration)
                  .resize(lambda t: 1.0 + 0.15 * (t / duration))
                  .set_position(("center", int(VIDEO_H * 0.40))))
+    
     layers = [bg, text_clip]
     if os.path.exists(LOGO_PATH):
         logo = (ImageClip(LOGO_PATH)
@@ -102,6 +119,7 @@ def _build_sfx_audio_clips(sfx_dir, scene_times, subtitle_times):
     if os.path.exists(t_path):
         for t in scene_times:
             clips.append(AudioFileClip(t_path).volumex(0.2).set_start(t))
+    
     p_path = os.path.join(sfx_dir, "pop.mp3")
     if os.path.exists(p_path):
         for t in subtitle_times:
@@ -123,6 +141,11 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RAT
 
 async def main():
     logger.info("🚀 Iniciando PyNarrator Pro...")
+    
+    # Inicialización para limpieza posterior
+    scene_clips, subtitle_clips, sfx_audio_clips = [], [], []
+    video = final_video = audio = music_audio = watermark = None
+
     try:
         with open("script.json", "r", encoding="utf-8") as f:
             script = json.load(f)
@@ -134,7 +157,6 @@ async def main():
         voice_data = await narrator.generate_voice_overs(script, tone=tone)
         visual_assets = get_visual_assets(script, tone=tone)
 
-        scene_clips = []
         zoom_in = True
         z_rate = _ZOOM_RATE_ENERGICO if tone == "ENERGICO" else _ZOOM_RATE_NORMAL
         x_fade = {"ENERGICO": 0.0, "INFORMATIVO": 0.5, "RELAJADO": 1.0}.get(tone, 0.5)
@@ -150,68 +172,70 @@ async def main():
         video = concatenate_videoclips(scene_clips, method="compose")
         audio_path = os.path.join(AUDIO_DIR, "final_voice.mp3")
         
-        # Generar subtítulos adaptativos
-        sub_clips, sub_times = generate_subtitles(audio_path, return_segment_times=True, tone=tone)
+        # Subtítulos y tiempos para SFX
+        subtitle_clips, subtitle_segment_times = generate_subtitles(audio_path, return_segment_times=True, tone=tone)
 
-        # Agregar Hook inicial
+        # Hook inicial
         hook_topic = (script[0].get("keyword") or "Contenido").strip()[:45]
         hook_clip = _make_hook_clip(hook_topic)
         
-        final_video = CompositeVideoClip([video] + sub_clips + [hook_clip], size=VIDEO_RES)
+        final_video = CompositeVideoClip([video] + subtitle_clips + [hook_clip], size=VIDEO_RES)
 
         # Marca de Agua
         if os.path.exists(LOGO_PATH):
-            wm = (ImageClip(LOGO_PATH).resize(width=200).set_opacity(0.5)
-                  .set_duration(final_video.duration).set_position(("right", "top")))
-            final_video = CompositeVideoClip([final_video, wm], size=VIDEO_RES)
+            watermark = (ImageClip(LOGO_PATH).resize(width=200).set_opacity(0.5)
+                        .set_duration(final_video.duration).set_position(("right", "top")))
+            final_video = CompositeVideoClip([final_video, watermark], size=VIDEO_RES)
 
-        # Color Grading según Tono
+        # Color Grading
         if tone == "ENERGICO":
             final_video = final_video.fx(vfx.lum_contrast, contrast=30)
         elif tone == "RELAJADO":
             final_video = final_video.fl_image(lambda f: np.clip(f * _WARM_FILTER_RGB, 0, 255).astype(np.uint8))
 
-        # Añadir CTA final
-        cta = _make_cta_clip()
-        final_video = concatenate_videoclips([final_video, cta], method="compose")
+        # CTA Final
+        cta_clip = _make_cta_clip()
+        final_video = concatenate_videoclips([final_video, cta_clip], method="compose")
 
-        # Audio final con Música y SFX
-        audio_clip = AudioFileClip(audio_path)
+        # Audio, Música y SFX
+        audio = AudioFileClip(audio_path)
         m_dir = {"ENERGICO": MUSIC_FAST_DIR, "INFORMATIVO": MUSIC_CORPORATE_DIR, "RELAJADO": MUSIC_SLOW_DIR}.get(tone, MUSIC_DIR)
         
         m_files = [os.path.join(m_dir, f) for f in os.listdir(m_dir) if f.endswith(".mp3")] if os.path.exists(m_dir) else []
         if m_files:
             music_path = random.choice(m_files)
-            logger.info("🎵 Música elegida: %s", os.path.basename(music_path))
-            bg_music = (AudioFileClip(music_path)
-                        .fx(afx.audio_loop, duration=final_video.duration)
-                        .volumex(0.1))
-            final_audio = CompositeAudioClip([audio_clip, bg_music])
+            music_audio = (AudioFileClip(music_path)
+                          .fx(afx.audio_loop, duration=final_video.duration)
+                          .volumex(0.1))
+            base_audio = CompositeAudioClip([audio, music_audio])
         else:
-            final_audio = audio_clip
+            base_audio = audio
 
-        # SFX
         scene_trans = []
         curr = 0.0
         for d in voice_data[:-1]:
             curr += d["duracion"]
             scene_trans.append(curr)
         
-        sfx_clips = _build_sfx_audio_clips(SFX_DIR, scene_trans, sub_times)
-        final_audio = CompositeAudioClip([final_audio] + sfx_clips)
-        
-        final_video = final_video.set_audio(final_audio)
+        sfx_audio_clips = _build_sfx_audio_clips(SFX_DIR, scene_trans, subtitle_segment_times)
+        final_video = final_video.set_audio(CompositeAudioClip([base_audio] + sfx_audio_clips))
 
         # Exportación
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         final_video.write_videofile(OUTPUT_PATH, fps=24, codec="libx264", audio_codec="aac", verbose=False, logger=None)
         
-        # Generar Copy para el CM
         generate_social_copy(script)
-        logger.info("✅ ¡Video e info de posteo listos en la carpeta output!")
+        logger.info("✅ ¡Todo listo en la carpeta output!")
 
     finally:
-        logger.info("🧹 Limpieza de recursos finalizada.")
+        logger.info("🧹 Liberando recursos...")
+        for c in scene_clips + subtitle_clips + sfx_audio_clips:
+            try: c.close()
+            except: pass
+        if video: video.close()
+        if final_video: final_video.close()
+        if audio: audio.close()
+        if music_audio: music_audio.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

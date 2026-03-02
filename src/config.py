@@ -13,35 +13,42 @@ AUDIO_DIR = os.path.join(ASSETS_DIR, "audio")
 IMAGES_DIR = os.path.join(ASSETS_DIR, "images")
 MUSIC_DIR = os.path.join(ASSETS_DIR, "music")
 
-# Subcarpetas para el "Director IA"
-MUSIC_FAST_DIR = os.path.join(MUSIC_DIR, "fast")       # Música para tono ENERGICO
-MUSIC_SLOW_DIR = os.path.join(MUSIC_DIR, "slow")       # Música para tono RELAJADO
-MUSIC_CORPORATE_DIR = os.path.join(MUSIC_DIR, "corporate") # Música para tono INFORMATIVO
+# --- DIRECTOR IA: Rutas de Música por Tono ---
+# Estas carpetas permiten que el script elija música según el sentimiento del guion
+MUSIC_FAST_DIR = os.path.join(MUSIC_DIR, "fast")           # Tono: ENERGICO
+MUSIC_SLOW_DIR = os.path.join(MUSIC_DIR, "slow")           # Tono: RELAJADO
+MUSIC_CORPORATE_DIR = os.path.join(MUSIC_DIR, "corporate") # Tono: INFORMATIVO
 
 SFX_DIR = os.path.join(ASSETS_DIR, "sfx")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-# Configuración de Voces Argentinas
+# Configuración de Voces Argentinas (Edge-TTS / Azure)
 VOICES = {
     "H": "es-AR-TomasNeural",
     "M": "es-AR-ElenaNeural"
 }
 
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
-VIDEO_RES = (1080, 1920) # Formato Reels/TikTok
+VIDEO_RES = (1080, 1920) # Formato vertical (9:16) para Reels/TikTok/Shorts
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
 def _configure_imagemagick():
-    """Configura automáticamente ImageMagick para MoviePy"""
+    """
+    Configura automáticamente ImageMagick para MoviePy buscando el binario
+    en diferentes sistemas operativos.
+    """
     try:
         from moviepy.config import change_settings
+        # Lista de nombres comunes para el ejecutable de ImageMagick
         for candidate in ("magick", "magick.exe", "convert"):
             path = shutil.which(candidate)
             if path:
                 change_settings({"IMAGEMAGICK_BINARY": path})
+                logger.info(f"✅ ImageMagick configurado en: {path}")
                 return
-        logger.warning("ImageMagick no encontrado. Subtítulos podrían fallar.")
+        logger.warning("⚠️ ImageMagick no encontrado. El renderizado de texto avanzado podría fallar.")
     except Exception as e:
-        logger.error(f"Error configurando ImageMagick: {e}")
+        logger.error(f"❌ Error configurando ImageMagick: {e}")
 
+# Ejecutar configuración al importar
 _configure_imagemagick()
