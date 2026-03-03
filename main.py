@@ -28,6 +28,7 @@ from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
     CompositeVideoClip, CompositeAudioClip, concatenate_videoclips, vfx,
 )
+from moviepy.audio.AudioClip import AudioArrayClip
 import moviepy.audio.fx.all as afx
 
 # Configuración de Logging
@@ -128,6 +129,69 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RAT
             .set_duration(duration)
             .fl_image(_enhance_frame))
 
+def _apply_high_pass_filter(clip, cutoff_hz=200):
+    """Apply FFT-based brick-wall High-Pass Filter at cutoff_hz Hz.
+
+    Removes bass frequencies below *cutoff_hz* from *clip* to keep the
+    audio mix clear and prevent muddiness under the narrator's voice.
+    """
+    fps = clip.fps
+    arr = clip.to_soundarray(fps=fps)
+    is_mono = arr.ndim == 1
+    if is_mono:
+        arr = arr[:, np.newaxis]
+    n = arr.shape[0]
+    freqs = np.fft.rfftfreq(n, d=1.0 / fps)
+    mask = freqs >= cutoff_hz
+    filtered = np.zeros_like(arr)
+    for ch in range(arr.shape[1]):
+        spectrum = np.fft.rfft(arr[:, ch])
+        spectrum[~mask] = 0.0
+        filtered[:, ch] = np.fft.irfft(spectrum, n=n)
+    return AudioArrayClip(filtered[:, 0] if is_mono else filtered, fps=fps)
+
+
+def _apply_smart_ducking(clip, voice_data, total_duration,
+                         duck_vol=0.04, full_vol=0.15, fade_s=0.3):
+    """Apply smart (radio-style) volume ducking to *clip*.
+
+    The volume is:
+    - *duck_vol* (4 %) while the narrator is speaking.
+    - *full_vol* (15 %) during silences and scene transitions.
+    Transitions between the two levels are smoothed over *fade_s* seconds.
+    """
+    fps = clip.fps
+    n = int(total_duration * fps)
+    fade_n = max(1, int(fade_s * fps))
+
+    envelope = np.full(n, full_vol, dtype=np.float64)
+    fade_down = np.linspace(full_vol, duck_vol, fade_n)
+    fade_up = np.linspace(duck_vol, full_vol, fade_n)
+
+    for vd in voice_data:
+        s = max(0, int(vd["start_time"] * fps))
+        e = min(n, int((vd["start_time"] + vd["duracion"]) * fps))
+        envelope[s:e] = duck_vol
+        # Smooth fade-in (full → duck) before speech
+        fd_start = max(0, s - fade_n)
+        fd_len = s - fd_start
+        if fd_len > 0:
+            envelope[fd_start:s] = fade_down[-fd_len:]
+        # Smooth fade-out (duck → full) after speech
+        fu_end = min(n, e + fade_n)
+        fu_len = fu_end - e
+        if fu_len > 0:
+            envelope[e:fu_end] = fade_up[:fu_len]
+
+    arr = clip.to_soundarray(fps=fps)
+    min_len = min(len(arr), n)
+    arr = arr[:min_len].astype(np.float64)
+    env = envelope[:min_len]
+    if arr.ndim == 2:
+        return AudioArrayClip(arr * env[:, np.newaxis], fps=fps)
+    return AudioArrayClip(arr * env, fps=fps)
+
+
 async def main():
     logger.info("🏗️ Generando video premium para Smartbuild...")
     
@@ -136,7 +200,7 @@ async def main():
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         logger.info(f"📁 Carpeta creada: {OUTPUT_DIR}")
 
-    scene_clips, subtitle_clips, sfx_audio_clips = [], [], []
+    scene_clips, subtitle_clips, sfx_audio_clips, sfx_clips = [], [], [], []
     video = final_video = None
 
     try:
@@ -180,27 +244,60 @@ async def main():
 
         # Audio final
         voice_audio = AudioFileClip(audio_path)
-        
-        # Música de fondo (ajustada para no tapar la voz)
+        total_dur = final_video.duration
+
+        # --- 1. Background music: HPF at 200 Hz + Smart Ducking ---
         m_dir = MUSIC_CORPORATE_DIR if tone == "INFORMATIVO" else MUSIC_DIR
         m_files = [os.path.join(m_dir, f) for f in os.listdir(m_dir) if f.endswith(".mp3")]
-        
-        if m_files:
-            bg_music = (AudioFileClip(random.choice(m_files))
-                        .fx(afx.audio_loop, duration=final_video.duration)
-                        .volumex(0.08)) # Bajamos un poco más la música para que brille la voz
-            final_audio = CompositeAudioClip([voice_audio, bg_music])
-        else:
-            final_audio = voice_audio
 
-        # Agregar SFX Pop
-        sfx_clips = []
+        music_ducked = None
+        if m_files:
+            raw_music = (AudioFileClip(random.choice(m_files))
+                         .fx(afx.audio_loop, duration=total_dur))
+            music_hpf = _apply_high_pass_filter(raw_music, cutoff_hz=200)
+            music_ducked = _apply_smart_ducking(music_hpf, voice_data, total_dur)
+            raw_music.close()
+
+        # --- 2. Construction ambience: looped at 0.02 + HPF at 200 Hz ---
+        amb_ducked = None
+        amb_path = os.path.join(SFX_DIR, "ambience_construction.mp3")
+        if os.path.exists(amb_path):
+            raw_amb = (AudioFileClip(amb_path)
+                       .fx(afx.audio_loop, duration=total_dur))
+            amb_hpf = _apply_high_pass_filter(raw_amb, cutoff_hz=200)
+            amb_arr = amb_hpf.to_soundarray(fps=amb_hpf.fps)
+            amb_ducked = AudioArrayClip(amb_arr * 0.02, fps=amb_hpf.fps)
+            raw_amb.close()
+
+        # --- 3. Transition SFX: 0.15 s before each scene change ---
+        t_path = os.path.join(SFX_DIR, "transition.mp3")
+        if os.path.exists(t_path):
+            for vd in voice_data[1:]:  # skip the first scene
+                t_start = max(0.0, vd["start_time"] - 0.15)
+                sfx_clips.append(AudioFileClip(t_path).set_start(t_start))
+
+        # --- 4. Sentence Pop: only after sentence-ending punctuation ---
         p_path = os.path.join(SFX_DIR, "pop.mp3")
         if os.path.exists(p_path):
-            for t in sub_times:
-                sfx_clips.append(AudioFileClip(p_path).volumex(0.15).set_start(t))
-        
-        final_video = final_video.set_audio(CompositeAudioClip([final_audio] + sfx_clips))
+            for i, (vd, item) in enumerate(zip(voice_data, script)):
+                if i == 0:
+                    continue
+                prev_text = script[i - 1].get("texto", "").rstrip()
+                if prev_text and prev_text[-1] in ".!?":
+                    sfx_clips.append(
+                        AudioFileClip(p_path).volumex(0.15).set_start(vd["start_time"])
+                    )
+
+        # --- 5. Compose & normalize all layers ---
+        audio_layers = [voice_audio]
+        if music_ducked is not None:
+            audio_layers.append(music_ducked)
+        if amb_ducked is not None:
+            audio_layers.append(amb_ducked)
+        audio_layers.extend(sfx_clips)
+
+        final_audio = CompositeAudioClip(audio_layers).fx(afx.audio_normalize)
+        final_video = final_video.set_audio(final_audio)
 
         # Renderizar
         final_video.write_videofile(OUTPUT_PATH, fps=24, codec="libx264", audio_codec="aac", 
@@ -210,7 +307,7 @@ async def main():
 
     finally:
         # Limpieza de recursos
-        for c in scene_clips + subtitle_clips + sfx_audio_clips:
+        for c in scene_clips + subtitle_clips + sfx_audio_clips + sfx_clips:
             try: c.close()
             except: pass
         if video: video.close()
