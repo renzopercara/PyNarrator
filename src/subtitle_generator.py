@@ -25,7 +25,14 @@ _STROKE_WIDTH = 10
 _SHADOW_OFFSET = (10, 10)
 _SHADOW_COLOR = (0, 0, 0, 150)
 
-_MAX_WORDS_PER_LINE = 3 # Máximo 3 palabras para alta retención
+_MAX_WORDS_PER_LINE = 3  # Fallback cap: never exceed 3 words even mid-sentence
+
+# Punctuation marks that signal the end of a semantic unit
+_SENTENCE_PUNCT = frozenset(".!?:;")
+
+# Minimum acceptable clip duration (seconds); clips shorter than this are extended
+_MIN_DURATION_THRESHOLD = 0.1
+_MIN_WORD_DURATION = 0.2
 
 # Búsqueda de fuentes
 _ASSETS_FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "fonts")
@@ -34,6 +41,36 @@ _FONT_CANDIDATES = [
     "C:/Windows/Fonts/impact.ttf",
     "C:/Windows/Fonts/arialbd.ttf",
 ]
+
+def _ends_sentence(word: str) -> bool:
+    """Return True if *word* ends with a sentence-breaking punctuation mark."""
+    return bool(word) and word[-1] in _SENTENCE_PUNCT
+
+
+def _group_words_by_punctuation(word_timings: list[dict]) -> list[list[dict]]:
+    """Group word timings into subtitle clips using punctuation breaks.
+
+    Rules:
+    - A group ends immediately after a word whose last character is in
+      ``_SENTENCE_PUNCT`` (., !, ?, :, ;).
+    - Groups are also capped at ``_MAX_WORDS_PER_LINE`` words so no line is
+      too long even inside a run-on sentence.
+    - Groups of any length (even 1 word) are kept as their own clip.
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+
+    for word_info in word_timings:
+        current.append(word_info)
+        if _ends_sentence(word_info["word"]) or len(current) >= _MAX_WORDS_PER_LINE:
+            groups.append(current)
+            current = []
+
+    if current:
+        groups.append(current)
+
+    return groups
+
 
 def _load_font(size: int):
     for path in _FONT_CANDIDATES:
@@ -127,19 +164,25 @@ def generate_subtitles(audio_path, script_data=None, return_segment_times=False,
             "end": timing["end"]
         })
 
-    # 4. Agrupar en líneas de 3 palabras y crear clips
-    for i in range(0, len(word_timings), _MAX_WORDS_PER_LINE):
-        group = word_timings[i : i + _MAX_WORDS_PER_LINE]
+    # 4. Agrupar por puntuación (y fallback a máximo de palabras) y crear clips
+    groups = _group_words_by_punctuation(word_timings)
+
+    for group in groups:
         group_text_list = [w["word"] for w in group]
-        
+
         segment_starts.append(group[0]["start"])
-        
+
         for idx, word_info in enumerate(group):
             start = word_info["start"]
-            # Asegurar que la palabra dure al menos hasta que empiece la siguiente o el fin del clip
-            duration = word_info["end"] - start
-            if duration < 0.1: duration = 0.2
-            
+            # Flicker prevention: each word lasts until the next word starts;
+            # the last word of the group uses its own Whisper end time.
+            if idx < len(group) - 1:
+                duration = group[idx + 1]["start"] - start
+            else:
+                duration = word_info["end"] - start
+            if duration < _MIN_DURATION_THRESHOLD:
+                duration = _MIN_WORD_DURATION
+
             clips.append(_make_segment_highlight_clip(group_text_list, idx, start, duration, _Y_POS))
 
     return (clips, segment_starts) if return_segment_times else clips
