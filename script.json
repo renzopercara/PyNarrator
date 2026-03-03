@@ -1,18 +1,74 @@
 [
   {
     "voz": "H",
-    "texto": "Bienvenidos a mi canal. Hoy vamos a ver cómo automatizar videos con Python.",
-    "keyword": "tecnología futurista",
+    "texto": "¿Otra vez la pared fuera de plomo?",
+    "keyword": "pared ladrillo torcida construcción mala",
+    "source": "https://images.pexels.com/photos/5854185/pexels-photo-5854185.jpeg"
+  },
+  {
+    "voz": "H",
+    "texto": "¿Cansado de que te cobren cualquier cosa y trabajen lento?",
+    "keyword": "hombre enojado construcción dinero presupuesto",
+    "source": "https://images.pexels.com/photos/5691544/pexels-photo-5691544.jpeg"
+  },
+  {
+    "voz": "M",
+    "texto": "Tranquilo. En Smartbuild cambiamos las reglas.",
+    "keyword": "mujer profesional construcción casco sonriendo",
     "source": "https://images.pexels.com/photos/3183150/pexels-photo-3183150.jpeg"
   },
   {
     "voz": "M",
-    "texto": "Es increíble cómo el código puede crear contenido de calidad sin esfuerzo.",
-    "keyword": "laptop coding forest"
+    "texto": "El problema no es la mano de obra, es la falta de un plan.",
+    "keyword": "arquitecta revisando planos obra profesional",
+    "source": "https://images.pexels.com/photos/3183143/pexels-photo-3183143.jpeg"
   },
   {
     "voz": "H",
-    "texto": "Si te gusta este contenido, no te olvides de darle like y suscribirte.",
-    "keyword": "social media like button"
+    "texto": "Pero... ¿Cómo sé que el cielorraso va a quedar bien?",
+    "keyword": "techo durlock construcción terminaciones",
+    "source": "https://images.pexels.com/photos/7218525/pexels-photo-7218525.jpeg"
+  },
+  {
+    "voz": "M",
+    "texto": "Fácil. Somos el nexo entre vos y los albañiles.",
+    "keyword": "reunión construcción trato manos cliente",
+    "source": "https://images.pexels.com/photos/3184418/pexels-photo-3184418.jpeg"
+  },
+  {
+    "voz": "M",
+    "texto": "Armamos planes detallados por tareas y por horas.",
+    "keyword": "cronograma obra Excel planificación construcción",
+    "source": "https://images.pexels.com/photos/3760067/pexels-photo-3760067.jpeg"
+  },
+  {
+    "voz": "M",
+    "texto": "Sabés qué se hace, cuánto tarda y el costo real.",
+    "keyword": "calculadora dinero construcción presupuesto claro",
+    "source": "https://images.pexels.com/photos/4386339/pexels-photo-4386339.jpeg"
+  },
+  {
+    "voz": "M",
+    "texto": "Ofrecemos seguimiento de obra y cuadrillas calificadas.",
+    "keyword": "albañil profesional trabajando nivel láser",
+    "source": "https://images.pexels.com/photos/5854193/pexels-photo-5854193.jpeg"
+  },
+  {
+    "voz": "H",
+    "texto": "¿Sos albañil? Escribinos vos también para trabajar mejor.",
+    "keyword": "constructor profesional herramientas apretón manos",
+    "source": "https://images.pexels.com/photos/159306/construction-site-build-construction-work-159306.jpeg"
+  },
+  {
+    "voz": "H",
+    "texto": "Smartbuild Construcciones. Control real para tu obra.",
+    "keyword": "casa moderna terminada arquitectura lujo",
+    "source": "https://images.pexels.com/photos/323780/pexels-photo-323780.jpeg"
+  },
+  {
+    "voz": "H",
+    "texto": "Contactanos al 3 4 3, 5 0 8, 0 0 8 5.",
+    "keyword": "teléfono inteligente contacto redes sociales",
+    "source": "https://images.pexels.com/photos/3184465/pexels-photo-3184465.jpeg"
   }
 ]
