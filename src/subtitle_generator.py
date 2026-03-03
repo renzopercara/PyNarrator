@@ -30,6 +30,9 @@ _MAX_WORDS_PER_LINE = 3  # Fallback cap: never exceed 3 words even mid-sentence
 # Punctuation marks that signal the end of a semantic unit
 _SENTENCE_PUNCT = frozenset(".!?:;")
 
+# Punctuation marks that specifically signal the end of a sentence (for SFX pop trigger)
+_SENTENCE_END_PUNCT = frozenset(".!?")
+
 # Minimum acceptable clip duration (seconds); clips shorter than this are extended
 _MIN_DURATION_THRESHOLD = 0.1
 _MIN_WORD_DURATION = 0.2
@@ -142,7 +145,7 @@ def generate_subtitles(audio_path, script_data=None, return_segment_times=False,
             script_words.extend(item.get("texto", "").split())
     
     if not script_words or not whisper_words:
-        return ([], []) if return_segment_times else []
+        return ([], [], []) if return_segment_times else []
 
     # 3. ALGORITMO DE DISTRIBUCIÓN PROPORCIONAL
     # Mapeamos las palabras del script a los tiempos de Whisper
@@ -185,4 +188,11 @@ def generate_subtitles(audio_path, script_data=None, return_segment_times=False,
 
             clips.append(_make_segment_highlight_clip(group_text_list, idx, start, duration, _Y_POS))
 
-    return (clips, segment_starts) if return_segment_times else clips
+    # Collect start times of groups that follow a sentence-ending punctuation mark (., !, ?)
+    sentence_start_times = [
+        groups[i][0]["start"]
+        for i in range(1, len(groups))
+        if groups[i - 1][-1]["word"] and groups[i - 1][-1]["word"][-1] in _SENTENCE_END_PUNCT
+    ]
+
+    return (clips, segment_starts, sentence_start_times) if return_segment_times else clips
