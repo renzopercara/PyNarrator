@@ -20,15 +20,13 @@ from src.sentiment_analyzer import analyze_tone
 from src.copy_generator import generate_social_copy
 from src.config import (
     OUTPUT_DIR, AUDIO_DIR,
-    MUSIC_DIR, MUSIC_FAST_DIR, MUSIC_SLOW_DIR, MUSIC_CORPORATE_DIR,
-    SFX_DIR, VIDEO_RES, LOGO_PATH,
+    MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,
 )
 
 from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
     CompositeVideoClip, CompositeAudioClip, concatenate_videoclips, vfx,
 )
-from moviepy.audio.AudioClip import AudioArrayClip
 import moviepy.audio.fx.all as afx
 
 # Configuración de Logging
@@ -41,8 +39,6 @@ logger = logging.getLogger(__name__)
 
 VIDEO_W, VIDEO_H = VIDEO_RES
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "video_final_smartbuild.mp4")
-_DEFAULT_AUDIO_FPS = 44100  # fallback sample rate when a clip has no fps set
-_VOICE_ACTIVITY_THRESHOLD = 0.10  # normalised RMS above which narrator is considered speaking
 
 # --- CONSTANTES DE ESTILO OPTIMIZADAS (MÁS BRILLO Y COLOR) ---
 _MIN_ZOOM_SCALE = 1.0
@@ -131,60 +127,6 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RAT
             .set_duration(duration)
             .fl_image(_enhance_frame))
 
-def _apply_highpass_filter(clip, cutoff_hz=200.0):
-    """Apply an FFT-based high-pass filter to remove frequencies below cutoff_hz.
-
-    Processes the entire clip as a numpy array and returns an AudioArrayClip
-    so the result can be looped or volume-adjusted like any other audio clip.
-    """
-    fps = clip.fps or _DEFAULT_AUDIO_FPS
-    arr = clip.to_soundarray(fps=fps)
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 1)
-    n = arr.shape[0]
-    freqs = np.fft.rfftfreq(n, d=1.0 / fps)
-    mask = freqs >= cutoff_hz
-    filtered = np.zeros_like(arr)
-    for ch in range(arr.shape[1]):
-        fft_data = np.fft.rfft(arr[:, ch])
-        fft_data[~mask] = 0
-        filtered[:, ch] = np.fft.irfft(fft_data, n=n)
-    return AudioArrayClip(np.clip(filtered, -1.0, 1.0), fps=fps).set_duration(clip.duration)
-
-
-def _build_ducking_music(music_clip, voice_clip, speak_vol=0.04, silence_vol=0.15, fade_dur=0.3):
-    """Return music_clip with smart ducking driven by the energy of voice_clip.
-
-    The music volume is lowered to speak_vol while the narrator is active and
-    raised to silence_vol during pauses/silences.  A convolution-based
-    smoothing kernel of fade_dur seconds ensures the transitions are gradual.
-    """
-    analysis_fps = 50  # 50 envelope samples per second
-    voice_arr = voice_clip.to_soundarray(fps=analysis_fps)
-    if voice_arr.ndim > 1:
-        voice_mono = np.abs(voice_arr).mean(axis=1)
-    else:
-        voice_mono = np.abs(voice_arr)
-
-    # Smooth amplitude envelope with a box-kernel to simulate fade-in/out
-    fade_samples = max(1, int(fade_dur * analysis_fps))
-    kernel = np.ones(fade_samples, dtype=np.float32) / fade_samples
-    smoothed = np.convolve(voice_mono.astype(np.float32), kernel, mode='same')
-
-    max_val = smoothed.max()
-    norm = smoothed / max_val if max_val > 0 else smoothed
-
-    # Build target-volume array and smooth it once more for gradual transitions
-    raw_target = np.where(norm > _VOICE_ACTIVITY_THRESHOLD, speak_vol, silence_vol).astype(np.float32)
-    target_vol = np.convolve(raw_target, kernel, mode='same')
-
-    def _duck(gf, t):
-        idx = min(int(t * analysis_fps), len(target_vol) - 1)
-        return gf(t) * float(target_vol[idx])
-
-    return music_clip.fl(_duck)
-
-
 async def main():
     logger.info("🏗️ Generando video premium para Smartbuild...")
     
@@ -238,27 +180,38 @@ async def main():
         # Audio final
         voice_audio = AudioFileClip(audio_path)
 
-        # --- Música de fondo: HPF 200 Hz + Smart Ducking ---
-        m_dir = MUSIC_CORPORATE_DIR if tone == "INFORMATIVO" else MUSIC_DIR
-        m_files = [os.path.join(m_dir, f) for f in os.listdir(m_dir) if f.endswith(".mp3")]
+        # --- Música de fondo: Tone-based selection + Safe Mixing ---
+        tone_music_dir = os.path.join(MUSIC_DIR, tone.lower())
+        m_files = []
+        if os.path.isdir(tone_music_dir):
+            try:
+                m_files = [os.path.join(tone_music_dir, f) for f in os.listdir(tone_music_dir)
+                           if f.endswith((".mp3", ".wav"))]
+            except OSError as e:
+                logger.warning("⚠️ No se pudo leer la carpeta de música '%s': %s", tone_music_dir, e)
+        if not m_files:
+            try:
+                m_files = [os.path.join(MUSIC_DIR, f) for f in os.listdir(MUSIC_DIR)
+                           if f.endswith((".mp3", ".wav"))]
+            except OSError as e:
+                logger.warning("⚠️ No se pudo leer la carpeta de música raíz '%s': %s", MUSIC_DIR, e)
 
         music_layers = []
         if m_files:
-            source_music = AudioFileClip(random.choice(m_files))
-            music_hpf = _apply_highpass_filter(source_music)
-            music_looped = music_hpf.fx(afx.audio_loop, duration=final_video.duration)
-            music_ducked = _build_ducking_music(music_looped, voice_audio)
-            music_layers.append(music_ducked)
+            music_looped = (AudioFileClip(random.choice(m_files))
+                            .fx(afx.audio_loop, duration=final_video.duration)
+                            .volumex(0.06)
+                            .audio_fadeout(2.0))
+            music_layers.append(music_looped)
 
-        # --- Ambience de obra: HPF 200 Hz + loop a volumen 0.02 ---
+        # --- Ambience de obra: loop a volumen 0.02 con fadeout ---
         ambience_layers = []
         a_path = os.path.join(SFX_DIR, "ambience_construction.mp3")
         if os.path.exists(a_path):
-            source_ambience = AudioFileClip(a_path)
-            ambience_hpf = _apply_highpass_filter(source_ambience)
-            ambience_looped = (ambience_hpf
+            ambience_looped = (AudioFileClip(a_path)
                                .fx(afx.audio_loop, duration=final_video.duration)
-                               .volumex(0.02))
+                               .volumex(0.02)
+                               .audio_fadeout(2.0))
             ambience_layers.append(ambience_looped)
 
         # --- SFX de Transición: 0.15s antes de cada cambio de escena ---
