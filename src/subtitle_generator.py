@@ -24,7 +24,7 @@ _Y_INFORMATIVO = int(_VIDEO_HEIGHT * 0.85)
 _ACTIVE_COLOR = (255, 215, 0, 255)    # Amarillo vibrante para palabra activa
 _INACTIVE_COLOR = (255, 255, 255, 255) # Blanco para palabras inactivas
 _STROKE_COLOR = (0, 0, 0, 255)      # Borde negro
-_STROKE_WIDTH = 6
+_STROKE_WIDTH = 8
 _SHADOW_OFFSET = (8, 8)
 _SHADOW_COLOR = (0, 0, 0, 180)      # Sombra suave
 
