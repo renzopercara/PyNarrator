@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 # Configuración Visual
 _VIDEO_WIDTH, _VIDEO_HEIGHT = VIDEO_RES
-_FONTSIZE = 75
+_FONTSIZE = 90
 _Y_NORMAL = int(_VIDEO_HEIGHT * 0.75) 
 _Y_INFORMATIVO = int(_VIDEO_HEIGHT * 0.85) 
 
-_TEXT_COLOR = (255, 215, 0, 255)    # Amarillo vibrante
-_HIGHLIGHT_COLOR = (255, 255, 255, 255) # Blanco para palabra actual
+_ACTIVE_COLOR = (255, 215, 0, 255)    # Amarillo vibrante para palabra activa
+_INACTIVE_COLOR = (255, 255, 255, 255) # Blanco para palabras inactivas
 _STROKE_COLOR = (0, 0, 0, 255)      # Borde negro
 _STROKE_WIDTH = 6
 _SHADOW_OFFSET = (8, 8)
@@ -81,12 +81,12 @@ def clean_word(word: str, is_first: bool = False) -> str:
     return lead + core + trail
 
 def _cubic_bezier_pop(t, pop_dur):
-    """Smooth-step (cubic Hermite) ease-in-out scale from 0.9 → 1.0 over *pop_dur* seconds."""
+    """Smooth-step (cubic Hermite) ease-in-out scale from 1.0 → 1.2 over *pop_dur* seconds."""
     if t >= pop_dur:
         return 1.0
     x = t / pop_dur
     ease = 3 * x * x - 2 * x * x * x  # smoothstep: S-curve ease-in-out
-    return 0.9 + 0.1 * ease
+    return 1.2 - 0.2 * ease  # starts at 1.2, eases down to 1.0
 
 
 def _make_segment_highlight_clip(segment_words, current_idx, start, duration, y_pos):
@@ -120,7 +120,7 @@ def _make_segment_highlight_clip(segment_words, current_idx, start, duration, y_
 
     x_offset = _STROKE_WIDTH
     for i, (token, bbox, font) in enumerate(zip(tokens, bboxes, fonts)):
-        color = _HIGHLIGHT_COLOR if i == current_idx else _TEXT_COLOR
+        color = _ACTIVE_COLOR if i == current_idx else _INACTIVE_COLOR
         # Sombra
         draw.text((x_offset - bbox[0] + _SHADOW_OFFSET[0], _STROKE_WIDTH - bbox[1] + _SHADOW_OFFSET[1]),
                   token, font=font, fill=_SHADOW_COLOR, stroke_width=_STROKE_WIDTH, stroke_fill=_SHADOW_COLOR)
@@ -137,40 +137,71 @@ def _make_segment_highlight_clip(segment_words, current_idx, start, duration, y_
             .resize(lambda t: _cubic_bezier_pop(t, pop_dur))
             .set_position(("center", y_pos)))
 
-def generate_subtitles(audio_path, return_segment_times=False, tone="ENERGICO"):
-    """Genera clips de subtítulos detectando tono y corrigiendo texto."""
+def generate_subtitles(audio_path, script_data=None, return_segment_times=False, tone="ENERGICO"):
+    """Genera clips de subtítulos detectando tono y usando el texto original del guion.
+
+    Whisper se usa únicamente para obtener los timestamps (start/end) de cada
+    palabra. El texto visible proviene siempre del campo ``"texto"`` de
+    ``script_data``, evitando así errores de transcripción ("alucinaciones").
+    """
     logger.info(f"🎙️ Transcribiendo audio para subtítulos (Tono: {tone})...")
     model = whisper.load_model("base")
     result = model.transcribe(audio_path, language="es", word_timestamps=True, fp16=False)
-    
+
     y_pos = _Y_INFORMATIVO if tone == "INFORMATIVO" else _Y_NORMAL
     clips = []
     segment_starts = []
-    is_very_first = True
 
+    # --- Collect all Whisper word-timestamps (timing only) ---------------------
+    all_whisper_words = []
     for segment in result.get("segments", []):
-        words_info = [w for w in segment.get("words", []) if w.get("word", "").strip()]
-        if not words_info: continue
+        for w in segment.get("words", []):
+            if w.get("word", "").strip():
+                all_whisper_words.append(w)
 
-        # Limpiar palabras del segmento
-        clean_words = []
-        for i, w_info in enumerate(words_info):
-            capital = is_very_first and i == 0
-            clean_words.append(clean_word(w_info["word"], is_first=capital))
+    # --- Build original word list from script_data["texto"] -------------------
+    if script_data:
+        original_words = []
+        for item in script_data:
+            for w in item.get("texto", "").split():
+                original_words.append(w)
+    else:
+        # Fallback: use Whisper's transcribed words when no script is provided
+        original_words = [w["word"].strip() for w in all_whisper_words]
 
-        if is_very_first: is_very_first = False
+    if not all_whisper_words or not original_words:
+        return (clips, segment_starts) if return_segment_times else clips
 
-        # Agrupar en líneas de máximo _MAX_WORDS_PER_LINE palabras
-        for group_start in range(0, len(words_info), _MAX_WORDS_PER_LINE):
-            group_words_info = words_info[group_start:group_start + _MAX_WORDS_PER_LINE]
-            group_clean_words = clean_words[group_start:group_start + _MAX_WORDS_PER_LINE]
+    if len(original_words) > len(all_whisper_words):
+        logger.warning(
+            "Script has %d words but Whisper detected only %d timing slots; "
+            "excess words will share the last timing slot.",
+            len(original_words), len(all_whisper_words),
+        )
 
-            segment_starts.append(group_words_info[0]["start"])
+    # --- Map each original word to the nearest Whisper timing slot ------------
+    word_timing_pairs = []
+    for i, orig_word in enumerate(original_words):
+        if i < len(all_whisper_words):
+            timing = all_whisper_words[i]
+        else:
+            timing = all_whisper_words[-1]
+        word_timing_pairs.append({
+            "word": orig_word,
+            "start": timing["start"],
+            "end": timing["end"],
+        })
 
-            # Crear un clip por cada palabra resaltada dentro del grupo
-            for idx, w_info in enumerate(group_words_info):
-                start = w_info["start"]
-                duration = max(w_info["end"] - start, 0.08)
-                clips.append(_make_segment_highlight_clip(group_clean_words, idx, start, duration, y_pos))
+    # --- Group into lines of _MAX_WORDS_PER_LINE and create clips -------------
+    for group_start in range(0, len(word_timing_pairs), _MAX_WORDS_PER_LINE):
+        group = word_timing_pairs[group_start:group_start + _MAX_WORDS_PER_LINE]
+        group_words = [w["word"] for w in group]
+
+        segment_starts.append(group[0]["start"])
+
+        for idx, w_info in enumerate(group):
+            start = w_info["start"]
+            duration = max(w_info["end"] - start, 0.08)
+            clips.append(_make_segment_highlight_clip(group_words, idx, start, duration, y_pos))
 
     return (clips, segment_starts) if return_segment_times else clips

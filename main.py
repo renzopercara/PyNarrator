@@ -212,7 +212,7 @@ async def main():
         audio_path = os.path.join(AUDIO_DIR, "final_voice.mp3")
         
         # Subtítulos y tiempos para SFX
-        subtitle_clips, subtitle_segment_times = generate_subtitles(audio_path, return_segment_times=True, tone=tone)
+        subtitle_clips, subtitle_segment_times = generate_subtitles(audio_path, script_data=script, return_segment_times=True, tone=tone)
 
         # Hook inicial
         hook_topic = (script[0].get("keyword") or "Contenido").strip()[:45]

@@ -52,10 +52,11 @@ class ArgentineNarrator:
             rate = _TONE_VOICE_RATE.get(tone, "+0%")
             pitch = _TONE_VOICE_PITCH.get(tone, "+0Hz")
             for idx, item in enumerate(script_data):
-                text = item.get("texto", "").strip()
+                # Use "fonetica" for TTS pronunciation if present, otherwise fall back to "texto"
+                text = (item.get("fonetica") or item.get("texto", "")).strip()
                 if not text:
                     raise ValueError(
-                        f"Item at index {idx} has empty 'texto'; cannot synthesise audio."
+                        f"Item at index {idx} has empty 'texto'/'fonetica'; cannot synthesise audio."
                     )
                 voice_key = item.get("voz", "H")
                 voice_name = VOICES.get(voice_key, VOICES["H"])
