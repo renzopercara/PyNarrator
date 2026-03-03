@@ -141,7 +141,7 @@ def generate_subtitles(audio_path, return_segment_times=False, tone="ENERGICO"):
     """Genera clips de subtítulos detectando tono y corrigiendo texto."""
     logger.info(f"🎙️ Transcribiendo audio para subtítulos (Tono: {tone})...")
     model = whisper.load_model("base")
-    result = model.transcribe(audio_path, language="es", word_timestamps=True)
+    result = model.transcribe(audio_path, language="es", word_timestamps=True, fp16=False)
     
     y_pos = _Y_INFORMATIVO if tone == "INFORMATIVO" else _Y_NORMAL
     clips = []
