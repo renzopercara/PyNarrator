@@ -234,6 +234,7 @@ async def main():
         # --- Mezcla final normalizada ---
         all_audio_layers = [voice_audio] + music_layers + ambience_layers + transition_sfx + pop_sfx
         final_audio = CompositeAudioClip(all_audio_layers)
+        final_audio.fps = 44100
         if len(all_audio_layers) > 1:
             final_audio = final_audio.fx(afx.audio_normalize)
 
