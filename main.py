@@ -47,6 +47,27 @@ _ZOOM_RATE_NORMAL = 0.02
 _ZOOM_RATE_ENERGICO = 0.05
 _WARM_FILTER_RGB = np.array([1.10, 1.00, 0.85], dtype=np.float32)
 
+# Vignette mask (computed once on first use)
+_VIGNETTE_MASK = None
+
+
+def _get_vignette_mask():
+    """Return a pre-computed (H, W, 1) float32 vignette multiplier array."""
+    global _VIGNETTE_MASK
+    if _VIGNETTE_MASK is None:
+        w, h = VIDEO_RES
+        xv, yv = np.meshgrid(np.linspace(-1, 1, w), np.linspace(-1, 1, h))
+        dist = np.sqrt(xv ** 2 + yv ** 2) / np.sqrt(2)
+        vignette = np.clip(1.0 - dist * 0.85, 0.0, 1.0).astype(np.float32)
+        _VIGNETTE_MASK = vignette[:, :, np.newaxis]
+    return _VIGNETTE_MASK
+
+
+def _apply_vignette(frame):
+    """Darken clip edges with a radial vignette so subtitles pop."""
+    mask = _get_vignette_mask()
+    return np.clip(frame.astype(np.float32) * mask, 0, 255).astype(np.uint8)
+
 # Font candidates shared by hook and CTA renderers
 _HOOK_FONT_CANDIDATES = [
     "C:/Windows/Fonts/arialbd.ttf",
@@ -129,15 +150,33 @@ def _build_sfx_audio_clips(sfx_dir, scene_times, subtitle_times):
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RATE_NORMAL):
     if not asset_path or not os.path.exists(asset_path):
         return ColorClip(size=VIDEO_RES, color=(50, 50, 50), duration=duration)
-    
+
     ext = os.path.splitext(asset_path)[1].lower()
     if ext == ".mp4":
         clip = VideoFileClip(asset_path)
-        return clip.subclip(0, duration) if clip.duration >= duration else clip.fx(vfx.loop, duration=duration)
+        base = clip.subclip(0, duration) if clip.duration >= duration else clip.fx(vfx.loop, duration=duration)
+        return base.fl_image(_apply_vignette)
 
-    resize_fn = (lambda t: min(1.0 + zoom_rate * t, 1.3)) if zoom_in else (lambda t: max(1.3 - zoom_rate * t, 1.0))
-    img_clip = ImageClip(asset_path).set_duration(duration).resize(resize_fn).set_position("center")
-    return CompositeVideoClip([img_clip], size=VIDEO_RES).set_duration(duration)
+    # Ken Burns + smooth zoom-in transition over last 0.5 s
+    _TRANSITION_DUR = 0.5
+
+    def _resize_fn(t):
+        base = min(1.0 + zoom_rate * t, 1.3) if zoom_in else max(1.3 - zoom_rate * t, 1.0)
+        remaining = duration - t
+        if remaining < _TRANSITION_DUR and _TRANSITION_DUR > 0:
+            progress = 1.0 - (remaining / _TRANSITION_DUR)
+            # cubic ease-in zoom push (x³) for outgoing transition
+            ease = progress * progress * progress
+            base = base * (1.0 + 0.1 * ease)
+        return base
+
+    img_clip = (ImageClip(asset_path)
+                .set_duration(duration)
+                .resize(_resize_fn)
+                .set_position("center"))
+    return (CompositeVideoClip([img_clip], size=VIDEO_RES)
+            .set_duration(duration)
+            .fl_image(_apply_vignette))
 
 async def main():
     logger.info("🚀 Iniciando PyNarrator Pro...")
