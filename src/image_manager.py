@@ -1,7 +1,7 @@
 import logging
 import os
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from src.config import IMAGES_DIR, PEXELS_API_KEY, VIDEO_RES
 
 logger = logging.getLogger(__name__)
@@ -185,6 +185,13 @@ def process_visual_asset(asset_path: str, output_path: str) -> str:
         # Image processing with Pillow
         with Image.open(asset_path) as img:
             img = img.convert("RGB")
+
+            enhancer = ImageEnhance.Brightness(img)
+            img = enhancer.enhance(1.2)
+            
+            contrast = ImageEnhance.Contrast(img)
+            img = contrast.enhance(1.1)
+
             img_w, img_h = img.size
             scale = max(_TARGET_W / img_w, _TARGET_H / img_h)
             new_w = int(img_w * scale)
