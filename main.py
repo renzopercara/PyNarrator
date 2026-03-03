@@ -7,6 +7,7 @@ import numpy as np
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
+import PIL.ImageEnhance
 
 # Parche para compatibilidad de Pillow con MoviePy
 if not hasattr(PIL.Image, 'ANTIALIAS'):
@@ -47,26 +48,24 @@ _ZOOM_RATE_NORMAL = 0.02
 _ZOOM_RATE_ENERGICO = 0.05
 _WARM_FILTER_RGB = np.array([1.10, 1.00, 0.85], dtype=np.float32)
 
-# Vignette mask (computed once on first use)
-_VIGNETTE_MASK = None
+# Enhancement constants
+_CONTRAST_BOOST = 1.10   # +10% contrast
+_SATURATION_BOOST = 1.10 # +10% saturation (vibrancy)
+_GAMMA_CORRECTION = 0.95   # gamma < 1 lifts midtones (~5% exposure boost)
 
 
-def _get_vignette_mask():
-    """Return a pre-computed (H, W, 1) float32 vignette multiplier array."""
-    global _VIGNETTE_MASK
-    if _VIGNETTE_MASK is None:
-        w, h = VIDEO_RES
-        xv, yv = np.meshgrid(np.linspace(-1, 1, w), np.linspace(-1, 1, h))
-        dist = np.sqrt(xv ** 2 + yv ** 2) / np.sqrt(2)
-        vignette = np.clip(1.0 - dist * 0.85, 0.0, 1.0).astype(np.float32)
-        _VIGNETTE_MASK = vignette[:, :, np.newaxis]
-    return _VIGNETTE_MASK
+def _enhance_frame(frame):
+    """Boost contrast (+10%) and saturation (+10%) with a subtle gamma correction.
 
-
-def _apply_vignette(frame):
-    """Darken clip edges with a radial vignette so subtitles pop."""
-    mask = _get_vignette_mask()
-    return np.clip(frame.astype(np.float32) * mask, 0, 255).astype(np.uint8)
+    Replaces the old vignette/darkening approach: images stay bright and
+    vibrant while colors are made to pop.
+    """
+    img = PIL.Image.fromarray(frame.astype(np.uint8))
+    img = PIL.ImageEnhance.Contrast(img).enhance(_CONTRAST_BOOST)
+    img = PIL.ImageEnhance.Color(img).enhance(_SATURATION_BOOST)
+    arr = np.array(img).astype(np.float32) / 255.0
+    arr = np.power(arr, _GAMMA_CORRECTION)
+    return np.clip(arr * 255, 0, 255).astype(np.uint8)
 
 # Font candidates shared by hook and CTA renderers
 _HOOK_FONT_CANDIDATES = [
@@ -155,7 +154,7 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RAT
     if ext == ".mp4":
         clip = VideoFileClip(asset_path)
         base = clip.subclip(0, duration) if clip.duration >= duration else clip.fx(vfx.loop, duration=duration)
-        return base.fl_image(_apply_vignette)
+        return base.fl_image(_enhance_frame)
 
     # Ken Burns + smooth zoom-in transition over last 0.5 s
     _TRANSITION_DUR = 0.5
@@ -176,7 +175,7 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RAT
                 .set_position("center"))
     return (CompositeVideoClip([img_clip], size=VIDEO_RES)
             .set_duration(duration)
-            .fl_image(_apply_vignette))
+            .fl_image(_enhance_frame))
 
 async def main():
     logger.info("🚀 Iniciando PyNarrator Pro...")
