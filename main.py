@@ -21,6 +21,7 @@ from src.copy_generator import generate_social_copy
 from src.config import (
     OUTPUT_DIR, AUDIO_DIR,
     MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,
+    WATERMARK_PATH, WATERMARK_OPACITY, WATERMARK_WIDTH_PERCENT,
 )
 
 from moviepy.editor import (
@@ -89,6 +90,23 @@ def _make_hook_clip(topic: str, duration: float = 2.0) -> ImageClip:
             .set_position(("center", 200)) 
             .crossfadeout(0.5))
 
+def _make_watermark_clip(video_duration: float) -> ImageClip:
+    """Carga el PNG, lo redimensiona y lo ubica abajo al centro."""
+    if not os.path.exists(WATERMARK_PATH):
+        logger.warning(f"Watermark no encontrado en: {WATERMARK_PATH}")
+        return None
+    
+    watermark_w = int(VIDEO_W * WATERMARK_WIDTH_PERCENT)
+    clip = ImageClip(WATERMARK_PATH).resize(width=watermark_w)
+    
+    # Posicionamiento: 50px de margen desde el borde inferior
+    bottom_y = VIDEO_H - clip.size[1] - 50
+    
+    return (clip
+            .set_opacity(WATERMARK_OPACITY)
+            .set_duration(video_duration)
+            .set_position(("center", bottom_y)))
+
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RATE_NORMAL):
     if not asset_path or not os.path.exists(asset_path):
         return ColorClip(size=VIDEO_RES, color=(240, 240, 240), duration=duration)
@@ -135,6 +153,7 @@ async def main():
         voice_data = await narrator.generate_voice_overs(script, tone=tone)
         visual_assets = get_visual_assets(script, tone=tone)
 
+        # 1. Crear clips de video
         zoom_in = True
         for i, (data, asset) in enumerate(zip(voice_data, visual_assets)):
             clip = _make_clip_for_scene(asset, data["duracion"], zoom_in, _ZOOM_RATE_NORMAL)
@@ -146,19 +165,28 @@ async def main():
         video = concatenate_videoclips(scene_clips, method="compose")
         audio_path = os.path.join(AUDIO_DIR, "final_voice.mp3")
         
-        # Subtítulos y tiempos de oraciones
-        subtitle_clips, _, sentence_start_times = generate_subtitles(audio_path, script_data=script, return_segment_times=True, tone=tone)
+        # 2. Generar Subtítulos
+        subtitle_clips, _, sentence_start_times = generate_subtitles(
+            audio_path, script_data=script, return_segment_times=True, tone=tone
+        )
 
+        # 3. Elementos de Branding
         hook_topic = (script[0].get("keyword") or "Smartbuild").strip()
         hook_clip = _make_hook_clip(hook_topic)
         
-        final_video = CompositeVideoClip([video] + subtitle_clips + [hook_clip], size=VIDEO_RES)
+        watermark = _make_watermark_clip(video.duration)
+        layers = [video]
+        if watermark:
+            layers.append(watermark)
+        
+        # Composición Visual (Video + Logo + Subtítulos + Título Inicial)
+        final_video = CompositeVideoClip(layers + subtitle_clips + [hook_clip], size=VIDEO_RES)
 
         # --- MEZCLA DE AUDIO PROFESIONAL ---
-        # 1. Voz Narrador (Boost de volumen para claridad)
-        voice_audio = AudioFileClip(audio_path).volumex(1.2)
+        # 1. Voz Narrador
+        voice_audio = AudioFileClip(audio_path).volumex(1.3)
 
-        # 2. Música de fondo según el tono
+        # 2. Música de fondo
         tone_music_dir = os.path.join(MUSIC_DIR, tone.lower())
         m_files = []
         if os.path.isdir(tone_music_dir):
@@ -172,7 +200,7 @@ async def main():
         if m_files:
             bg_music = (AudioFileClip(random.choice(m_files))
                         .fx(afx.audio_loop, duration=final_video.duration)
-                        .volumex(0.06)
+                        .volumex(0.07)
                         .audio_fadeout(2.0))
             audio_layers.append(bg_music)
 
@@ -181,40 +209,30 @@ async def main():
         if os.path.exists(a_path):
             ambience = (AudioFileClip(a_path)
                         .fx(afx.audio_loop, duration=final_video.duration)
-                        .volumex(0.015)
+                        .volumex(0.02)
                         .audio_fadeout(2.0))
             audio_layers.append(ambience)
 
-        # 4. SFX Transición (Volumen bajado drásticamente para no tapar voz)
-        t_path = os.path.join(SFX_DIR, "transition.mp3")
-        if os.path.exists(t_path):
-            cumulative = 0.0
-            for data in voice_data[:-1]:
-                cumulative += data["duracion"]
-                sfx_start = max(0.0, cumulative - 0.15)
-                audio_layers.append(AudioFileClip(t_path).volumex(0.08).set_start(sfx_start))
-
-        # 5. SFX Pop (Volumen sutil)
+        # 4. SFX Pop sutil en cada inicio de frase (para resaltar las pausas)
         p_path = os.path.join(SFX_DIR, "pop.mp3")
         if os.path.exists(p_path):
             for t in sentence_start_times:
-                audio_layers.append(AudioFileClip(p_path).volumex(0.10).set_start(t))
+                audio_layers.append(AudioFileClip(p_path).volumex(0.12).set_start(t))
 
-        # Mezcla final
+        # Mezcla final de Audio
         final_audio = CompositeAudioClip(audio_layers)
         final_audio.fps = 44100
-        if len(audio_layers) > 1:
-            final_audio = final_audio.fx(afx.audio_normalize)
-
+        
         final_video = final_video.set_audio(final_audio)
 
-        # Renderizar
+        # 4. Render Final
         final_video.write_videofile(OUTPUT_PATH, fps=24, codec="libx264", audio_codec="aac", 
                                     threads=4, logger=None, verbose=False)
         
-        logger.info("✅ ¡Video Smartbuild generado con éxito!")
+        logger.info(f"✅ ¡Video Smartbuild generado con éxito en: {OUTPUT_PATH}!")
 
     finally:
+        # Limpieza de memoria
         for c in scene_clips + subtitle_clips:
             try: c.close()
             except: pass
@@ -222,4 +240,6 @@ async def main():
         if final_video: final_video.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    async def run():
+        await main()
+    asyncio.run(run())
