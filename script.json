@@ -2,168 +2,211 @@
   {
     "voz": "H",
     "texto": "¿Estás construyendo o pensando en construir?",
-    "fonetica": "¿Estás construyendo o pensando en construir?",
+    "fonetica": "¿Estás construyendo... o pensando en construir?...",
     "keyword": "hombre obra construccion argentina",
     "source": "https://images.unsplash.com/photo-1503387762-592deb58ef4e"
   },
   {
     "voz": "H",
     "texto": "Si es así, quedate hasta el final.",
-    "fonetica": "Si es así, quedate hasta el final.",
+    "fonetica": "Si es así... ¡quedate hasta el final!...",
     "keyword": "hombre hablando camara obra",
     "source": "https://images.unsplash.com/photo-1522202176988-66273c2fd55f"
   },
   {
     "voz": "H",
     "texto": "Ya sé lo que estás pensando.",
-    "fonetica": "Ya sé lo que estás pensando.",
+    "fonetica": "Ya sé... lo que estás pensando.",
     "keyword": "hombre pensando construccion",
     "source": "https://images.unsplash.com/photo-1519389950473-47ba0277781c"
   },
   {
     "voz": "H",
-    "texto": "El presupuesto debería traerlo el constructor.",
-    "fonetica": "El presupuesto debería traerlo el constructor.",
+    "texto": "El presupuesto debería traerlo el constructor. ¿No?",
+    "fonetica": "El presupuesto... debería traerlo el constructor. ¿No?...",
     "keyword": "discusion presupuesto obra argentina",
     "source": "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c"
   },
   {
     "voz": "H",
-    "texto": "Si alguna vez lo viste detallado…",
-    "fonetica": "Si alguna vez lo viste detallado…",
+    "texto": "Si alguna vez lo viste detallado",
+    "fonetica": "Si alguna vez... lo viste DETALLADO...",
     "keyword": "hombre bromeando construccion",
     "source": "https://images.unsplash.com/photo-1551836022-d5d88e9218df"
   },
   {
     "voz": "H",
-    "texto": "Dejá tu comentario y te felicitamos.",
-    "fonetica": "Dejá tu comentario y te felicitamos.",
+    "texto": "Dejá tu comentario así te felicitamos.",
+    "fonetica": "Dejá tu comentario... ¡así te felicitamos!...",
     "keyword": "hombre sonriendo obra argentina",
     "source": "https://images.unsplash.com/photo-1519389950473-47ba0277781c"
   },
   {
     "voz": "M",
     "texto": "En Smartbuild hacemos algo distinto.",
-    "fonetica": "En Smartbild hacemos algo distinto.",
+    "fonetica": "En SMARTBILD... hacemos algo distinto...",
     "keyword": "mujer profesional construccion casco",
     "source": "https://images.unsplash.com/photo-1600880292203-757bb62b4baf"
   },
   {
     "voz": "M",
     "texto": "Armamos con vos un plan detallado.",
-    "fonetica": "Armamos con vos un plan detallado.",
+    "fonetica": "Armamos con vos... un plan detallado...",
     "keyword": "planos arquitecto argentina",
     "source": "https://images.unsplash.com/photo-1504307651254-35680f356dfd"
   },
   {
     "voz": "M",
     "texto": "Tarea por tarea.",
-    "fonetica": "Tarea por tarea.",
+    "fonetica": "Tarea. Por. Tarea.",
     "keyword": "planificacion obra profesional",
     "source": "https://images.unsplash.com/photo-1504307651254-35680f356dfd"
   },
   {
     "voz": "M",
     "texto": "Estimamos tiempos reales.",
-    "fonetica": "Estimamos tiempos reales.",
+    "fonetica": "Estimamos... tiempos REALES.",
     "keyword": "cronograma construccion argentina",
     "source": "https://images.unsplash.com/photo-1556157382-97eda2d62296"
   },
   {
     "voz": "M",
     "texto": "Proponemos una tarifa por hora.",
-    "fonetica": "Proponemos una tarifa por hora.",
+    "fonetica": "Proponemos... una tarifa por hora...",
     "keyword": "calculadora presupuesto argentina",
     "source": "https://images.unsplash.com/photo-1554224155-6726b3ff858f"
   },
   {
     "voz": "M",
     "texto": "Calculamos el valor real del trabajo.",
-    "fonetica": "Calculamos el valor real del trabajo.",
+    "fonetica": "Calculamos el valor real... del trabajo...",
     "keyword": "presupuesto claro construccion",
     "source": "https://images.unsplash.com/photo-1554224155-6726b3ff858f"
   },
   {
     "voz": "M",
-    "texto": "Lo presentás al albañil.",
-    "fonetica": "Lo presentás al albañil.",
+    "texto": "Se lo presentás al albañil.",
+    "fonetica": "Se lo presentás... al albañil.",
     "keyword": "albanil trabajando argentina",
     "source": "https://images.unsplash.com/photo-1487958449943-2429e8be8625"
   },
   {
     "voz": "M",
-    "texto": "Cobra cuando termina cada etapa.",
-    "fonetica": "Cobra cuando termina cada etapa.",
+    "texto": "Y cobra cuando termina cada etapa.",
+    "fonetica": "Y cobra... cuando termina cada etapa.",
     "keyword": "pago por avance obra argentina",
     "source": "https://images.unsplash.com/photo-1487958449943-2429e8be8625"
   },
   {
+    "voz": "M",
+    "texto": "Lo mejor: el nivel de detalle es alto.",
+    "fonetica": "Lo mejor... el nivel de detalle... es ALTO.",
+    "keyword": "planos detalle construccion",
+    "source": "https://images.unsplash.com/photo-1503387762-592deb58ef4e"
+  },
+  {
+    "voz": "M",
+    "texto": "Así, el albañil no podrá decirte:",
+    "fonetica": "Así... el albañil... no podrá decirte...",
+    "keyword": "arquitecta profesional obra",
+    "source": "https://images.unsplash.com/photo-1541888946425-d81bb19480c5"
+  },
+  {
+    "voz": "H",
+    "texto": "Esto no estaba en el presupuesto.",
+    "fonetica": "Esto... no estaba en el presupuesto.",
+    "keyword": "hombre confundido obra",
+    "source": "https://images.unsplash.com/photo-1589156229687-496a31ad1d1f"
+  },
+  {
+    "voz": "M",
+    "texto": "Nadie va a arrancarte la cabeza.",
+    "fonetica": "Nadie... va a arrancarte la cabeza.",
+    "keyword": "dinero ahorro construccion",
+    "source": "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c"
+  },
+  {
+    "voz": "M",
+    "texto": "Porque nosotros definimos el valor del trabajo.",
+    "fonetica": "Porque NOSOTROS... definimos el valor del trabajo.",
+    "keyword": "profesionales calculando presupuesto",
+    "source": "https://images.unsplash.com/photo-1556157382-97eda2d62296"
+  },
+  {
+    "voz": "M",
+    "texto": "Y nosotros te respaldamos siempre.",
+    "fonetica": "Y nosotros... te respaldamos... siempre.",
+    "keyword": "equipo profesional respaldo",
+    "source": "https://images.unsplash.com/photo-1600880292203-757bb62b4baf"
+  },
+
+  {
     "voz": "H",
     "texto": "¿Y si necesito otra cosa?",
-    "fonetica": "¿Y si necesito otra cosa?",
+    "fonetica": "¿Y si necesito... otra cosa?",
     "keyword": "hombre consultando obra",
     "source": "https://images.unsplash.com/photo-1522202176988-66273c2fd55f"
   },
   {
     "voz": "M",
     "texto": "Todos los servicios son independientes.",
-    "fonetica": "Todos los servicios son independientes.",
+    "fonetica": "Todos los servicios... son independientes.",
     "keyword": "reunion equipo tecnico construccion",
     "source": "https://images.unsplash.com/photo-1581092580497-e0d23cbdf1dc"
   },
   {
     "voz": "M",
     "texto": "Planes de trabajo a medida.",
-    "fonetica": "Planes de trabajo a medida.",
+    "fonetica": "Planes de trabajo... a medida.",
     "keyword": "planificacion construccion argentina",
     "source": "https://images.unsplash.com/photo-1504307651254-35680f356dfd"
   },
   {
     "voz": "M",
     "texto": "Seguimiento de obra con visitas reales.",
-    "fonetica": "Seguimiento de obra con visitas reales.",
+    "fonetica": "Seguimiento de obra... con visitas REALES.",
     "keyword": "supervision obra argentina",
     "source": "https://images.unsplash.com/photo-1487958449943-2429e8be8625"
   },
   {
     "voz": "M",
     "texto": "Te ayudamos a conseguir albañiles.",
-    "fonetica": "Te ayudamos a conseguir albañiles.",
+    "fonetica": "Te ayudamos... a conseguir albañiles.",
     "keyword": "albaniles construccion argentina",
     "source": "https://images.unsplash.com/photo-1504917595217-d4dc5ebe6122"
   },
   {
     "voz": "M",
     "texto": "Hacemos planos e instalaciones.",
-    "fonetica": "Hacemos planos e instalaciones.",
+    "fonetica": "Hacemos planos... e instalaciones.",
     "keyword": "planos instalaciones construccion",
     "source": "https://images.unsplash.com/photo-1503387762-592deb58ef4e"
   },
   {
     "voz": "H",
     "texto": "Smartbuild Construcciones.",
-    "fonetica": "Smartbild Construcciones.",
+    "fonetica": "SMARTBILD... Construcciones.",
     "keyword": "casa moderna argentina terminada",
     "source": "https://images.unsplash.com/photo-1564013799919-ab600027ffc6"
   },
   {
     "voz": "H",
     "texto": "Ordená tu obra antes que te desordene.",
-    "fonetica": "Ordená tu obra antes que te desordene.",
+    "fonetica": "Ordená tu obra... antes que te desordene.",
     "keyword": "casa terminada argentina",
     "source": "https://images.unsplash.com/photo-1564013799919-ab600027ffc6"
   },
   {
     "voz": "H",
     "texto": "Crespo, Entre Ríos.",
-    "fonetica": "Crespo, Entre Ríos.",
+    "fonetica": "Crespo... Entre Ríos.",
     "keyword": "ciudad argentina construccion",
     "source": "https://images.unsplash.com/photo-1503387762-592deb58ef4e"
   },
   {
     "voz": "H",
     "texto": "Escribinos al +54 343 508-0085.",
-    "fonetica": "Escribinos al más cincuenta y cuatro, tres cuarenta y tres, cinco cero ocho, cero cero ocho cinco.",
+    "fonetica": "Escribinos al... más cincuenta y cuatro. Tres cuarenta y tres. Cinco cero ocho. Cero cero ocho cinco.",
     "keyword": "telefono contacto argentina",
     "source": "https://images.unsplash.com/photo-1512499617640-c2f999098c01"
   }
