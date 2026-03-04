@@ -29,8 +29,8 @@
   },
   {
     "voz": "H",
-    "texto": "El presupuesto debería traerlo el constructor, ¿No es así?",
-    "fonetica": "El presupuesto... debería traerlo el constructor ¿No es así?...",
+    "texto": "El presupuesto debería traerlo el constructor",
+    "fonetica": "El presupuesto... debería traerlo el constructor...",
     "keyword": "discusion presupuesto obra argentina",
     "source": "https://images.unsplash.com/photo-1711606815631-38d32cdaec3e?q=80&w=2070&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D"
   },
@@ -92,15 +92,15 @@
   },
   {
     "voz": "M",
-    "texto": "Después, se lo presentás al albañil.",
-    "fonetica": "Después... se lo presen-TÁÁS... al albañil.",
+    "texto": "Después, vos se lo dás al albañil.",
+    "fonetica": "Después... vos se lo dás! al albañil.",
     "keyword": "albanil trabajando argentina",
     "source": "https://plus.unsplash.com/premium_photo-1723780905770-e9d78dba73a4?q=80&w=2070&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D"
   },
   {
     "voz": "M",
-    "texto": "Él cobrará al terminar cada etapa.",
-    "fonetica": "Él. cobrará al terminar, cada etapa...",
+    "texto": "Él recibe su pago al terminar cada etapa.",
+    "fonetica": "El recibe su pago al terminar cada etapa...",
     "keyword": "pago por avance obra argentina",
     "source": "https://images.unsplash.com/photo-1630705683475-c645b897ef22?q=80&w=1974&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D"
   },
@@ -149,14 +149,14 @@
   {
     "voz": "H",
     "texto": "¿Y si necesito otra cosa?",
-    "fonetica": "¿Y si nece-SITO... otra cosa?...",
+    "fonetica": "¿Y si necesito otra cosa?...",
     "keyword": "hombre consultando obra",
     "source": "https://images.unsplash.com/photo-1522202176988-66273c2fd55f"
   },
   {
     "voz": "H",
     "texto": "¿Qué servicios ofrecen?",
-    "fonetica": "¿Qué ser-VICIOS... ofrecen?...",
+    "fonetica": "¿Qué servicios ofrecen?...",
     "keyword": "reunion equipo tecnico construccion",
     "source": "https://images.unsplash.com/photo-1522202176988-66273c2fd55f"
   },
