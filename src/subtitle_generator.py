@@ -1,3 +1,4 @@
+import difflib
 import os
 import re
 import logging
@@ -37,6 +38,10 @@ _SENTENCE_END_PUNCT = frozenset(".!?")
 _MIN_DURATION_THRESHOLD = 0.1
 _MIN_WORD_DURATION = 0.2
 
+# Anticipation offset: show subtitles slightly before the word is spoken so
+# the viewer's eye can land on it before the audio arrives (seconds).
+OFFSET_ANTICIPACION = 0.1
+
 # Búsqueda de fuentes
 _ASSETS_FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "fonts")
 _FONT_CANDIDATES = [
@@ -48,6 +53,132 @@ _FONT_CANDIDATES = [
 def _ends_sentence(word: str) -> bool:
     """Return True if *word* ends with a sentence-breaking punctuation mark."""
     return bool(word) and word[-1] in _SENTENCE_PUNCT
+
+
+def _normalize_word(w: str) -> str:
+    """Strip punctuation and lowercase *w* for fuzzy comparison.
+
+    This allows matching ``"Smartbuild"`` (texto) against ``"Smartbild"``
+    (Whisper transcription of the phonetic audio) by normalising both sides
+    before running the sequence alignment.
+    """
+    return re.sub(r"[^\w]", "", w.lower())
+
+
+def _align_texto_to_whisper(
+    texto_words: list[str], whisper_words: list[dict]
+) -> list[dict]:
+    """Map *texto_words* to Whisper word timestamps via sequence alignment.
+
+    Whisper transcribes the *fonetica* audio (which may contain phonetic
+    spellings, e.g. "Smartbild"), so its word list can differ from the
+    *texto* display words ("Smartbuild").  We normalise both sequences and
+    use a three-pass strategy:
+
+    1. **Sequence alignment** – :class:`difflib.SequenceMatcher` on the full
+       word lists to anchor common/identical words quickly.
+    2. **Character-level fuzzy matching** – for any *texto* word that was not
+       anchored in pass 1, we search the neighbouring unmatched Whisper words
+       for the highest character-similarity match (Levenshtein-like ratio via
+       :meth:`difflib.SequenceMatcher.ratio`), respecting monotonic ordering.
+    3. **Interpolation** – timestamps for words still unmatched after both
+       passes are linearly interpolated between the nearest anchored
+       neighbours.
+
+    Args:
+        texto_words:   Display words from the ``"texto"`` fields of the script.
+        whisper_words: Word-level dicts from Whisper (keys: ``word``,
+                       ``start``, ``end``).
+
+    Returns:
+        List of dicts with keys ``word`` (from *texto_words*), ``start``,
+        and ``end`` (in seconds, sourced from or interpolated between
+        Whisper timestamps).
+    """
+    texto_norm = [_normalize_word(w) for w in texto_words]
+    whisper_norm = [_normalize_word(w["word"]) for w in whisper_words]
+
+    # --- Pass 1: sequence-level alignment (exact / near-exact word matches) ---
+    matcher = difflib.SequenceMatcher(None, texto_norm, whisper_norm, autojunk=False)
+    mapping: dict[int, int] = {}
+    whisper_used: set[int] = set()
+    for block in matcher.get_matching_blocks():
+        if block.size == 0:
+            continue
+        for offset in range(block.size):
+            ti = block.a + offset
+            wi = block.b + offset
+            mapping[ti] = wi
+            whisper_used.add(wi)
+
+    # --- Pass 2: character-level fuzzy matching for still-unmatched words ---
+    # Only consider Whisper words that (a) haven't been used yet and (b) lie
+    # between the nearest already-anchored neighbours to preserve time order.
+    _FUZZY_THRESHOLD = 0.6
+
+    for ti in range(len(texto_words)):
+        if ti in mapping:
+            continue
+
+        # Determine the Whisper index bounds from anchored neighbours
+        prev_wi = next((mapping[j] for j in range(ti - 1, -1, -1) if j in mapping), -1)
+        next_wi = next(
+            (mapping[j] for j in range(ti + 1, len(texto_words)) if j in mapping),
+            len(whisper_words),
+        )
+        candidates = [
+            wi
+            for wi in range(prev_wi + 1, next_wi)
+            if wi not in whisper_used
+        ]
+
+        best_score, best_wi = 0.0, None
+        for wi in candidates:
+            score = difflib.SequenceMatcher(
+                None, texto_norm[ti], whisper_norm[wi]
+            ).ratio()
+            if score > best_score:
+                best_score, best_wi = score, wi
+
+        if best_wi is not None and best_score >= _FUZZY_THRESHOLD:
+            mapping[ti] = best_wi
+            whisper_used.add(best_wi)
+
+    # --- Pass 3: interpolate remaining unmatched words ---
+    result: list[dict] = []
+    n = len(texto_words)
+
+    for i, word in enumerate(texto_words):
+        if i in mapping:
+            w = whisper_words[mapping[i]]
+            result.append({"word": word, "start": w["start"], "end": w["end"]})
+        else:
+            # Interpolate between the nearest anchored neighbours
+            prev_i = next((j for j in range(i - 1, -1, -1) if j in mapping), None)
+            next_i = next((j for j in range(i + 1, n) if j in mapping), None)
+
+            if prev_i is not None and next_i is not None:
+                prev_end = whisper_words[mapping[prev_i]]["end"]
+                next_start = whisper_words[mapping[next_i]]["start"]
+                gap = max(next_start - prev_end, 0.0)
+                steps = max(next_i - prev_i, 1)  # guard against degenerate case
+                step_size = gap / steps
+                start = prev_end + (i - prev_i) * step_size
+                end = start + step_size
+            elif prev_i is not None:
+                prev_end = whisper_words[mapping[prev_i]]["end"]
+                start = prev_end
+                end = prev_end + _MIN_WORD_DURATION
+            elif next_i is not None:
+                next_start = whisper_words[mapping[next_i]]["start"]
+                end = next_start
+                start = max(0.0, next_start - _MIN_WORD_DURATION)
+            else:
+                start, end = 0.0, _MIN_WORD_DURATION
+
+            result.append({"word": word, "start": start, "end": end})
+
+    return result
 
 
 def _group_words_by_punctuation(word_timings: list[dict]) -> list[list[dict]]:
@@ -131,43 +262,34 @@ def generate_subtitles(audio_path, script_data=None, return_segment_times=False,
 
     clips = []
     segment_starts = []
-    
+
     # 1. Obtener todos los timestamps de Whisper
     whisper_words = []
     for seg in result.get("segments", []):
         for w in seg.get("words", []):
             whisper_words.append(w)
 
-    # 2. Obtener lista de palabras del SCRIPT (La verdad absoluta)
+    # 2. Obtener lista de palabras del SCRIPT (La verdad absoluta para subtítulos)
     script_words = []
     if script_data:
         for item in script_data:
             script_words.extend(item.get("texto", "").split())
-    
+
     if not script_words or not whisper_words:
         return ([], [], []) if return_segment_times else []
 
-    # 3. ALGORITMO DE DISTRIBUCIÓN PROPORCIONAL
-    # Mapeamos las palabras del script a los tiempos de Whisper
-    # Si hay diferencia de cantidad, interpolamos para que no haya saltos.
-    word_timings = []
-    
-    total_script = len(script_words)
-    total_whisper = len(whisper_words)
-    
-    for i in range(total_script):
-        # Buscamos el índice proporcional en los tiempos de Whisper
-        w_idx = int((i / total_script) * total_whisper)
-        w_idx = min(w_idx, total_whisper - 1)
-        
-        timing = whisper_words[w_idx]
-        word_timings.append({
-            "word": script_words[i],
-            "start": timing["start"],
-            "end": timing["end"]
-        })
+    # 3. ALINEACIÓN POR SECUENCIA (Fuzzy Matching)
+    # Usamos SequenceMatcher para mapear las palabras del texto de visualización
+    # a los timestamps reales de Whisper, ignorando diferencias fonéticas
+    # (ej. "Smartbild" en fonetica → "Smartbuild" en texto).
+    word_timings = _align_texto_to_whisper(script_words, whisper_words)
 
-    # 4. Agrupar por puntuación (y fallback a máximo de palabras) y crear clips
+    # 4. Aplicar OFFSET_ANTICIPACION para que el subtítulo aparezca
+    # ligeramente antes de que el locutor pronuncie cada palabra.
+    for wt in word_timings:
+        wt["start"] = max(0.0, wt["start"] - OFFSET_ANTICIPACION)
+
+    # 5. Agrupar por puntuación (y fallback a máximo de palabras) y crear clips
     groups = _group_words_by_punctuation(word_timings)
 
     for group in groups:
