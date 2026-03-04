@@ -21,6 +21,7 @@ from src.copy_generator import generate_social_copy
 from src.config import (
     OUTPUT_DIR, AUDIO_DIR,
     MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,
+    WATERMARK_PATH, WATERMARK_OPACITY, WATERMARK_WIDTH_PERCENT,
 )
 
 from moviepy.editor import (
@@ -99,6 +100,18 @@ def _make_hook_clip(topic: str, duration: float = 2.0) -> ImageClip:
             .set_position(("center", 200)) # Arriba para no tapar el centro
             .crossfadeout(0.5))
 
+def _make_watermark_clip(video_duration: float) -> ImageClip:
+    """Load the watermark PNG, resize it, apply opacity, and position at bottom-center."""
+    if not os.path.exists(WATERMARK_PATH):
+        raise FileNotFoundError(f"Watermark file not found: {WATERMARK_PATH}")
+    watermark_w = int(VIDEO_W * WATERMARK_WIDTH_PERCENT)
+    clip = ImageClip(WATERMARK_PATH).resize(width=watermark_w)
+    bottom_y = max(0, VIDEO_H - clip.size[1] - 50)
+    return (clip
+            .set_opacity(WATERMARK_OPACITY)
+            .set_duration(video_duration)
+            .set_position(("center", bottom_y)))
+
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, zoom_rate=_ZOOM_RATE_NORMAL):
     if not asset_path or not os.path.exists(asset_path):
         return ColorClip(size=VIDEO_RES, color=(240, 240, 240), duration=duration)
@@ -165,17 +178,15 @@ async def main():
         # Generar subtítulos EXACTOS al campo "texto"
         subtitle_clips, _, sentence_start_times = generate_subtitles(audio_path, script_data=script, return_segment_times=True, tone=tone)
 
-        # Hook y Composición Final
+        # Hook e inclusión del watermark en la composición final
         hook_topic = (script[0].get("keyword") or "Smartbuild").strip()
         hook_clip = _make_hook_clip(hook_topic)
-        
-        final_video = CompositeVideoClip([video] + subtitle_clips + [hook_clip], size=VIDEO_RES)
 
-        # Marca de Agua sutil
-        if os.path.exists(LOGO_PATH):
-            logo = (ImageClip(LOGO_PATH).resize(width=180).set_opacity(0.4)
-                    .set_duration(final_video.duration).set_position(("right", "top")))
-            final_video = CompositeVideoClip([final_video, logo], size=VIDEO_RES)
+        watermark_layers = []
+        if os.path.exists(WATERMARK_PATH):
+            watermark_layers.append(_make_watermark_clip(video.duration))
+
+        final_video = CompositeVideoClip([video] + watermark_layers + subtitle_clips + [hook_clip], size=VIDEO_RES)
 
         # Audio final
         voice_audio = AudioFileClip(audio_path)
