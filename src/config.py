@@ -32,7 +32,7 @@ LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 WATERMARK_PATH = os.path.join(ASSETS_DIR, "logo.png")
 WATERMARK_OPACITY = 0.8
 WATERMARK_WIDTH_PERCENT = 0.25
-VIDEO_RES = (1080, 1920) # Formato vertical (9:16) para Reels/TikTok/Shorts
+VIDEO_RES = (1080, 1350) # Formato vertical (9:16) para Reels/TikTok/Shorts
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
