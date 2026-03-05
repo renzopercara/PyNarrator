@@ -71,31 +71,60 @@ def test_whisper_model() -> bool:
 def test_assets_permissions() -> bool:
     """Verify that the required asset directories exist and are writable."""
     logger.info("Checking asset directory permissions...")
-    from src.config import ASSETS_DIR, AUDIO_DIR, IMAGES_DIR, OUTPUT_DIR  # noqa: PLC0415
+    try:
+        from src.config import ASSETS_DIR, AUDIO_DIR, IMAGES_DIR, OUTPUT_DIR  # noqa: PLC0415
 
-    dirs = {
-        "assets": ASSETS_DIR,
-        "audio": AUDIO_DIR,
-        "images": IMAGES_DIR,
-        "output": OUTPUT_DIR,
-    }
+        dirs = {
+            "assets": ASSETS_DIR,
+            "audio": AUDIO_DIR,
+            "images": IMAGES_DIR,
+            "output": OUTPUT_DIR,
+        }
 
-    all_ok = True
-    for name, path in dirs.items():
-        os.makedirs(path, exist_ok=True)
-        probe = os.path.join(path, ".write_test")
-        try:
-            with open(probe, "w") as fh:
-                fh.write("ok")
-            os.remove(probe)
-            logger.info("  [%s] %s  ✓", name, path)
-        except OSError as exc:
-            logger.error("  [%s] %s  ✗ – %s", name, path, exc)
-            all_ok = False
+        all_ok = True
+        for name, path in dirs.items():
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_test")
+            try:
+                with open(probe, "w") as fh:
+                    fh.write("ok")
+                os.remove(probe)
+                logger.info("  [%s] %s  ✓", name, path)
+            except OSError as exc:
+                logger.error("  [%s] %s  ✗ – %s", name, path, exc)
+                all_ok = False
 
-    if all_ok:
-        logger.info("All asset directories are writable. ✓")
-    return all_ok
+        if all_ok:
+            logger.info("All asset directories are writable. ✓")
+        return all_ok
+    except Exception as exc:
+        logger.error("Asset directory check failed: %s", exc)
+        return False
+
+
+def test_openai_api() -> bool:
+    """Verify that the OpenAI API key is present and the phonetic transcriber works."""
+    logger.info("Checking OpenAI API key and phonetic transcriber...")
+    try:
+        from src.config import OPENAI_API_KEY  # noqa: PLC0415
+
+        if not OPENAI_API_KEY:
+            logger.error("OPENAI_API_KEY is not set. Add it to your .env file.")
+            return False
+
+        from src.phonetic_transcriber import EnglishPhoneticTranscriber  # noqa: PLC0415
+
+        transcriber = EnglishPhoneticTranscriber(api_key=OPENAI_API_KEY)
+        result = transcriber.transcribe("The challenge was huge")
+        if result:
+            logger.info("Phonetic transcriber works. Sample: %r  ✓", result)
+            return True
+        else:
+            logger.error("Phonetic transcriber returned an empty result.")
+            return False
+    except Exception as exc:  # noqa: BLE001
+        logger.error("OpenAI API / phonetic transcriber check failed: %s", exc)
+        return False
 
 
 def test_vocabulary_annotator() -> bool:
@@ -105,31 +134,11 @@ def test_vocabulary_annotator() -> bool:
         from src.vocabulary_annotator import annotate_story  # noqa: PLC0415
 
         cases = [
-            # Basic annotation: known B1 word gets a gloss
-            (
-                "The challenge was big.",
-                "challenge (desafío)",
-            ),
-            # Max 2 glosses per sentence rule
-            (
-                "She had to overcome many obstacles and demonstrate her skill.",
-                None,  # just check it runs without error
-            ),
-            # Unknown / basic words are NOT annotated
-            (
-                "The cat sat on the mat.",
-                None,
-            ),
-            # Multiple sentences: each resets the counter
-            (
-                "The challenge was enormous. She had to overcome it.",
-                "challenge (desafío)",
-            ),
-            # Empty input returns unchanged
-            (
-                "",
-                "",
-            ),
+            ("The challenge was big.", "challenge (desafío)"),
+            ("She had to overcome many obstacles and demonstrate her skill.", None),
+            ("The cat sat on the mat.", None),
+            ("The challenge was enormous. She had to overcome it.", "challenge (desafío)"),
+            ("", ""),
         ]
 
         all_ok = True
@@ -137,36 +146,23 @@ def test_vocabulary_annotator() -> bool:
             result = annotate_story(story)
             if expected_fragment is not None and expected_fragment not in result:
                 logger.error(
-                    "Annotator test FAILED for input %r: expected fragment %r "
-                    "not found in result %r",
-                    story,
-                    expected_fragment,
-                    result,
+                    "Annotator test FAILED for input %r: expected fragment %r not found",
+                    story, expected_fragment
                 )
                 all_ok = False
             else:
                 logger.info("  [annotator] %r → %r  ✓", story[:40], result[:60])
 
-        # Verify the 2-per-sentence cap: a sentence with 3 known words must
-        # yield exactly 2 annotations (i.e. exactly 2 opening parentheses).
+        # Verify the 2-per-sentence cap
         cap_sentence = "She had to overcome the challenge and demonstrate her skill."
         cap_result = annotate_story(cap_sentence)
         annotation_count = cap_result.count("(")
         if annotation_count != 2:
-            logger.error(
-                "Annotator cap test FAILED: %d annotations inserted (expected exactly 2) in %r",
-                annotation_count,
-                cap_result,
-            )
+            logger.error("Annotator cap test FAILED: expected 2, got %d", annotation_count)
             all_ok = False
         else:
-            logger.info(
-                "  [annotator cap] %d/2 annotations in capped sentence  ✓",
-                annotation_count,
-            )
+            logger.info("  [annotator cap] 2/2 annotations in capped sentence  ✓")
 
-        if all_ok:
-            logger.info("Vocabulary annotator tests passed. ✓")
         return all_ok
     except Exception as exc:  # noqa: BLE001
         logger.error("Vocabulary annotator test failed: %s", exc)
@@ -178,6 +174,7 @@ if __name__ == "__main__":
         "Pexels API key": test_pexels_api(),
         "Whisper model": test_whisper_model(),
         "Asset folder permissions": test_assets_permissions(),
+        "OpenAI API key / phonetic transcriber": test_openai_api(),
         "Vocabulary annotator": test_vocabulary_annotator(),
     }
 
@@ -186,7 +183,7 @@ if __name__ == "__main__":
     total = len(results)
     for check, ok in results.items():
         status = "PASS ✓" if ok else "FAIL ✗"
-        logger.info("  %-30s %s", check, status)
+        logger.info("  %-40s %s", check, status)
     logger.info("-" * 50)
     logger.info("Results: %d/%d checks passed.", passed, total)
 
