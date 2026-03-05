@@ -89,12 +89,23 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True):
     ext = os.path.splitext(asset_path)[1].lower()
     
     if ext == ".mp4":
-        # Forzamos que el video ocupe todo el alto y recortamos el ancho sobrante
-        clip = VideoFileClip(asset_path).resize(height=VIDEO_H)
-        # El crop es fundamental para asegurar que no queden bordes negros
+        clip = VideoFileClip(asset_path)
+        # Crop-Fill: escalar para cubrir el eje menor y recortar el eje mayor.
+        # Esto garantiza que no queden bordes de 1 píxel ni transparencias.
+        vid_aspect = clip.w / clip.h
+        target_aspect = VIDEO_W / VIDEO_H
+        if vid_aspect > target_aspect:
+            # Video más ancho que 9:16: ajustar por altura y recortar ancho sobrante
+            clip = clip.resize(height=VIDEO_H)
+        else:
+            # Video más alto o igual: ajustar por ancho y recortar alto sobrante
+            clip = clip.resize(width=VIDEO_W)
         clip = clip.crop(x_center=clip.w/2, y_center=clip.h/2, width=VIDEO_W, height=VIDEO_H)
         base = clip.subclip(0, duration) if clip.duration >= duration else clip.fx(vfx.loop, duration=duration)
-        return base.fl_image(_enhance_frame)
+        base = base.fl_image(_enhance_frame)
+        # Fondo negro sólido para eliminar cualquier transparencia residual
+        bg = ColorClip(VIDEO_RES, color=(0, 0, 0))
+        return CompositeVideoClip([bg, base], size=VIDEO_RES).set_duration(duration)
 
     # --- Lógica para Imágenes ---
     img_clip = ImageClip(asset_path).set_duration(duration)
