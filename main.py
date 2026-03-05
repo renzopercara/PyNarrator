@@ -18,6 +18,7 @@ from src.image_manager import get_visual_assets
 from src.subtitle_generator import generate_subtitles
 from src.sentiment_analyzer import analyze_tone
 from src.copy_generator import generate_social_copy
+from src.vocabulary_annotator import annotate_story
 from src.config import (
     OUTPUT_DIR, AUDIO_DIR,
     MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,

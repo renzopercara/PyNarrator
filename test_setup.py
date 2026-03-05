@@ -98,11 +98,87 @@ def test_assets_permissions() -> bool:
     return all_ok
 
 
+def test_vocabulary_annotator() -> bool:
+    """Verify that the vocabulary annotator correctly glosses B1/B2/C1 words."""
+    logger.info("Testing vocabulary annotator...")
+    try:
+        from src.vocabulary_annotator import annotate_story  # noqa: PLC0415
+
+        cases = [
+            # Basic annotation: known B1 word gets a gloss
+            (
+                "The challenge was big.",
+                "challenge (desafío)",
+            ),
+            # Max 2 glosses per sentence rule
+            (
+                "She had to overcome many obstacles and demonstrate her skill.",
+                None,  # just check it runs without error
+            ),
+            # Unknown / basic words are NOT annotated
+            (
+                "The cat sat on the mat.",
+                None,
+            ),
+            # Multiple sentences: each resets the counter
+            (
+                "The challenge was enormous. She had to overcome it.",
+                "challenge (desafío)",
+            ),
+            # Empty input returns unchanged
+            (
+                "",
+                "",
+            ),
+        ]
+
+        all_ok = True
+        for story, expected_fragment in cases:
+            result = annotate_story(story)
+            if expected_fragment is not None and expected_fragment not in result:
+                logger.error(
+                    "Annotator test FAILED for input %r: expected fragment %r "
+                    "not found in result %r",
+                    story,
+                    expected_fragment,
+                    result,
+                )
+                all_ok = False
+            else:
+                logger.info("  [annotator] %r → %r  ✓", story[:40], result[:60])
+
+        # Verify the 2-per-sentence cap: a sentence with 3 known words must
+        # yield exactly 2 annotations (i.e. exactly 2 opening parentheses).
+        cap_sentence = "She had to overcome the challenge and demonstrate her skill."
+        cap_result = annotate_story(cap_sentence)
+        annotation_count = cap_result.count("(")
+        if annotation_count != 2:
+            logger.error(
+                "Annotator cap test FAILED: %d annotations inserted (expected exactly 2) in %r",
+                annotation_count,
+                cap_result,
+            )
+            all_ok = False
+        else:
+            logger.info(
+                "  [annotator cap] %d/2 annotations in capped sentence  ✓",
+                annotation_count,
+            )
+
+        if all_ok:
+            logger.info("Vocabulary annotator tests passed. ✓")
+        return all_ok
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Vocabulary annotator test failed: %s", exc)
+        return False
+
+
 if __name__ == "__main__":
     results = {
         "Pexels API key": test_pexels_api(),
         "Whisper model": test_whisper_model(),
         "Asset folder permissions": test_assets_permissions(),
+        "Vocabulary annotator": test_vocabulary_annotator(),
     }
 
     logger.info("-" * 50)
