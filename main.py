@@ -24,6 +24,10 @@ from src.config import (
     MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,
     WATERMARK_PATH, WATERMARK_OPACITY, WATERMARK_WIDTH_PERCENT,
 )
+from src.context import (
+    detect_context as _detect_context,
+    output_path_for_context as _output_path_for_context,
+)
 
 from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
@@ -40,7 +44,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VIDEO_W, VIDEO_H = VIDEO_RES
-OUTPUT_PATH = os.path.join(OUTPUT_DIR, "video_final_smartbuild.mp4")
 
 # --- CONSTANTES DE ESTILO OPTIMIZADAS ---
 _ZOOM_RATE_NORMAL = 0.02
@@ -134,13 +137,16 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True):
             .fl_image(_enhance_frame))
 
 async def main():
-    logger.info("🏗️ Iniciando proceso de renderizado Smartbuild...")
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     try:
         with open("script.json", "r", encoding="utf-8") as f:
             script = json.load(f)
-        
+
+        context = _detect_context(script)
+        output_path = _output_path_for_context(context)
+        logger.info("🎬 Contexto detectado: %s → %s", context, output_path)
+
         tone = analyze_tone(script)
         narrator = ArgentineNarrator()
         voice_data = await narrator.generate_voice_overs(script, tone=tone)
@@ -162,7 +168,7 @@ async def main():
         subtitle_clips, _, sentence_start_times = generate_subtitles(
             audio_path, script_data=script, return_segment_times=True, tone=tone
         )
-        hook_clip = _make_hook_clip((script[0].get("keyword") or "Smartbuild").strip())
+        hook_clip = _make_hook_clip((script[0].get("keyword") or context).strip())
         watermark = _make_watermark_clip(base_video.duration)
         
         layers = [base_video]
@@ -200,9 +206,9 @@ async def main():
         final_video = final_video.set_audio(CompositeAudioClip(audio_layers))
 
         # 4. Render Final
-        logger.info(f"💾 Exportando a: {OUTPUT_PATH}")
+        logger.info(f"💾 Exportando a: {output_path}")
         final_video.write_videofile(
-            OUTPUT_PATH, 
+            output_path,
             fps=24, 
             codec="libx264", 
             audio_codec="aac", 
