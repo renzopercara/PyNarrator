@@ -98,11 +98,37 @@ def test_assets_permissions() -> bool:
     return all_ok
 
 
+def test_openai_api() -> bool:
+    """Verify that the OpenAI API key is present and the phonetic transcriber works."""
+    logger.info("Checking OpenAI API key and phonetic transcriber...")
+    try:
+        from src.config import OPENAI_API_KEY  # noqa: PLC0415
+
+        if not OPENAI_API_KEY:
+            logger.error("OPENAI_API_KEY is not set. Add it to your .env file.")
+            return False
+
+        from src.phonetic_transcriber import EnglishPhoneticTranscriber  # noqa: PLC0415
+
+        transcriber = EnglishPhoneticTranscriber(api_key=OPENAI_API_KEY)
+        result = transcriber.transcribe("The challenge was huge")
+        if result:
+            logger.info("Phonetic transcriber works. Sample: %r  ✓", result)
+            return True
+        else:
+            logger.error("Phonetic transcriber returned an empty result.")
+            return False
+    except Exception as exc:  # noqa: BLE001
+        logger.error("OpenAI API / phonetic transcriber check failed: %s", exc)
+        return False
+
+
 if __name__ == "__main__":
     results = {
         "Pexels API key": test_pexels_api(),
         "Whisper model": test_whisper_model(),
         "Asset folder permissions": test_assets_permissions(),
+        "OpenAI API key / phonetic transcriber": test_openai_api(),
     }
 
     logger.info("-" * 50)
