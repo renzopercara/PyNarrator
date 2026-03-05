@@ -362,23 +362,12 @@ def _format_story(sentences: list[str]) -> str:
 def generate_esl_story(topic: str, level: str) -> str:
     """Generate a short ESL story for adult learners.
 
-    Creates a 6-sentence English story following ESL teaching guidelines
-    as described in the prompt template below::
+    Creates a 6-sentence English story following ESL teaching guidelines:
 
-        Actúa como un profesor experto en ESL (English as a Second Language).
-
-        Crea una historia corta de aprendizaje de inglés con estas reglas:
-        - Tema: [TEMA]
-        - Nivel: [A2 / B1 / B2 / C1]
-        - 6 oraciones cortas
-        - Máximo 10 palabras por oración
-        - Lenguaje natural y conversacional
-        - Contexto cotidiano o profesional
-        - Debe ser útil para estudiantes adultos
-
-        NO agregues traducciones.
-        NO agregues fonética.
-        Solo devuelve las 6 oraciones en inglés.
+    - Maximum 10 words per sentence.
+    - Natural and conversational language.
+    - Everyday or professional context.
+    - No translations or phonetics included.
 
     Args:
         topic: The story topic in any language (e.g. ``"work"``, ``"travel"``,

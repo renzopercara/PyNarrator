@@ -200,7 +200,7 @@ class TestGenerateEslStory:
 
     def test_invalid_level_raises_value_error(self):
         with pytest.raises(ValueError, match="Invalid level"):
-            generate_esl_story("work", "X9")
+            generate_esl_story("work", "A1")
 
     def test_invalid_level_message_lists_valid_levels(self):
         with pytest.raises(ValueError) as exc_info:
