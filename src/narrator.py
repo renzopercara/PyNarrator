@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import re
 import edge_tts
 from moviepy.editor import concatenate_audioclips, AudioFileClip
 import os
 from src.config import VOICES, AUDIO_DIR
+
+logger = logging.getLogger(__name__)
 
 # Voice rate adjustments per tone (edge-tts rate string format)
 _TONE_VOICE_RATE: dict[str, str] = {
