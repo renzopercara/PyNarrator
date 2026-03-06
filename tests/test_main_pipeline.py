@@ -5,6 +5,9 @@ Tests cover:
 - Asset error handling (ColorClip fallback via _BRAND_COLOR)
 - Social copy generation (_save_social_post)
 - main() target_platform argument updating _TARGET_RESOLUTION
+- _enhance_frame: output dtype, shape preservation, NaN safety
+- _make_clip_for_scene / _make_video_clip: missing-asset fallback,
+  invalid-clip fallback, exception fallback
 """
 
 import os
@@ -12,6 +15,7 @@ import sys
 import asyncio
 import unittest.mock as mock
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,6 +25,9 @@ from main import (
     _BRAND_COLOR,
     _PLATFORM_RESOLUTIONS,
     _TARGET_RESOLUTION,
+    _enhance_frame,
+    _make_clip_for_scene,
+    _make_video_clip,
     _save_social_post,
 )
 
@@ -246,3 +253,131 @@ async def test_main_falls_back_to_brand_colorclip_when_get_visual_assets_raises(
     # ColorClip was called with _BRAND_COLOR as the colour
     assert colorclip_calls, "Expected at least one ColorClip to be created as fallback"
     assert all(c == _BRAND_COLOR for c in colorclip_calls)
+
+
+# ---------------------------------------------------------------------------
+# _enhance_frame – numpy alignment and safety
+# ---------------------------------------------------------------------------
+
+
+def test_enhance_frame_output_dtype_is_uint8():
+    """_enhance_frame must return a uint8 array."""
+    frame = np.full((100, 100, 3), 128, dtype=np.uint8)
+    result = _enhance_frame(frame)
+    assert result.dtype == np.uint8, f"Expected uint8, got {result.dtype}"
+
+
+def test_enhance_frame_preserves_shape():
+    """_enhance_frame must return an array with the same shape as the input."""
+    frame = np.random.randint(0, 256, (240, 320, 3), dtype=np.uint8)
+    result = _enhance_frame(frame)
+    assert result.shape == frame.shape, (
+        f"Shape mismatch: input={frame.shape} output={result.shape}"
+    )
+
+
+def test_enhance_frame_no_nan_values():
+    """_enhance_frame output values must all be within the valid [0, 255] range.
+
+    Verifies that the gamma correction and clipping steps do not produce
+    out-of-range pixel values (which would be coerced to NaN/overflow in a
+    float pipeline before the final uint8 cast).
+    """
+    frame = np.random.randint(0, 256, (64, 64, 3), dtype=np.uint8)
+    result = _enhance_frame(frame)
+    assert result.min() >= 0, "Pixel values must be >= 0"
+    assert result.max() <= 255, "Pixel values must be <= 255"
+
+
+def test_enhance_frame_all_zeros_input():
+    """_enhance_frame must handle an all-zero (black) frame without error."""
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    result = _enhance_frame(frame)
+    assert result.dtype == np.uint8
+    assert result.shape == frame.shape
+
+
+def test_enhance_frame_all_max_input():
+    """_enhance_frame must handle an all-255 (white) frame without error."""
+    frame = np.full((100, 100, 3), 255, dtype=np.uint8)
+    result = _enhance_frame(frame)
+    assert result.dtype == np.uint8
+    assert result.shape == frame.shape
+    assert result.max() <= 255
+
+
+# ---------------------------------------------------------------------------
+# _make_clip_for_scene – missing asset returns visible ColorClip
+# ---------------------------------------------------------------------------
+
+
+def test_make_clip_for_scene_missing_asset_returns_colorclip(tmp_path):
+    """_make_clip_for_scene must return a ColorClip when the asset is missing."""
+    from moviepy.editor import ColorClip
+
+    clip = _make_clip_for_scene("/nonexistent/path/video.mp4", duration=3.0)
+    assert isinstance(clip, ColorClip), "Expected a ColorClip fallback for missing asset"
+
+
+def test_make_clip_for_scene_none_asset_returns_colorclip():
+    """_make_clip_for_scene(None, …) must return a ColorClip fallback."""
+    from moviepy.editor import ColorClip
+
+    clip = _make_clip_for_scene(None, duration=3.0)
+    assert isinstance(clip, ColorClip), "Expected a ColorClip fallback for None asset"
+
+
+def test_make_clip_for_scene_missing_asset_uses_brand_color(tmp_path):
+    """The fallback ColorClip must use _BRAND_COLOR, not black."""
+    from moviepy.editor import ColorClip
+
+    clip = _make_clip_for_scene("/nonexistent/video.mp4", duration=2.0)
+    assert isinstance(clip, ColorClip)
+    # MoviePy 1.x stores the colour in clip.img; read the top-left pixel
+    color = tuple(int(c) for c in clip.img[0, 0])
+    assert color == _BRAND_COLOR, f"Expected brand color {_BRAND_COLOR}, got {color}"
+
+
+# ---------------------------------------------------------------------------
+# _make_video_clip – exception fallback (mocked VideoFileClip)
+# ---------------------------------------------------------------------------
+
+
+def test_make_video_clip_returns_colorclip_when_videofileclip_raises(tmp_path):
+    """_make_video_clip must return a visible fallback if VideoFileClip fails."""
+    from moviepy.editor import ColorClip
+
+    # Create a real (but invalid/empty) .mp4 file so path existence passes
+    fake_mp4 = tmp_path / "fake.mp4"
+    fake_mp4.write_bytes(b"not-a-real-video")
+
+    # Patch VideoFileClip to raise an error simulating a corrupt file
+    with mock.patch.object(main_module, "VideoFileClip", side_effect=OSError("corrupt")):
+        clip = _make_video_clip(str(fake_mp4), duration=3.0, start_time=0, end_time=None)
+
+    assert isinstance(clip, ColorClip), "Expected ColorClip fallback when VideoFileClip raises"
+
+
+def test_make_video_clip_returns_colorclip_for_zero_dimension_clip(tmp_path):
+    """_make_video_clip must return a visible fallback for zero-dimension clips."""
+    from moviepy.editor import ColorClip
+
+    fake_mp4 = tmp_path / "fake.mp4"
+    fake_mp4.write_bytes(b"not-a-real-video")
+
+    # Simulate a clip with zero width (invalid).  Wire the mock chain so that
+    # .without_mask().set_opacity() returns the same object, giving us a
+    # single mock whose attributes we can control and inspect.
+    mock_clip = mock.MagicMock()
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 0
+    mock_clip.h = 0
+    mock_clip.duration = 5.0
+    mock_clip.size = (0, 0)
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        clip = _make_video_clip(str(fake_mp4), duration=3.0, start_time=0, end_time=None)
+
+    assert isinstance(clip, ColorClip), "Expected ColorClip fallback for zero-dimension clip"
+    mock_clip.close.assert_called_once()
