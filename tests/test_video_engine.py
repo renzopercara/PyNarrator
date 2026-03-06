@@ -13,6 +13,7 @@ from src.video_engine import (
     _FFMPEG_PARAMS,
     _TARGET_RESOLUTION,
     _YTDLP_FORMAT,
+    _transcode_to_proxy,
     build_source_clip,
     download_video,
     render_video,
@@ -149,11 +150,12 @@ def test_build_source_clip_calls_without_mask_and_set_opacity(tmp_path):
     mock_clip.w = 1280
     mock_clip.h = 720
 
-    # Chain: without_mask() returns something, set_opacity() returns something,
-    # subclip() returns something.
+    # Chain: without_mask() → set_opacity() → set_fps() → subclip() → mock_clip
     mock_clip.without_mask.return_value = mock_clip
     mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
 
     mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
 
@@ -168,7 +170,10 @@ def test_build_source_clip_calls_without_mask_and_set_opacity(tmp_path):
             {"moviepy.editor": types.ModuleType("moviepy.editor")},
         ):
             sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
-            result = build_source_clip(str(dummy), start_time=13, end_time=26)
+            sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+            # transcode_proxy=False avoids calling ffmpeg in unit tests
+            result = build_source_clip(str(dummy), start_time=13, end_time=26, transcode_proxy=False)
 
     mock_clip.without_mask.assert_called_once()
     mock_clip.set_opacity.assert_called_once_with(1)
@@ -185,7 +190,9 @@ def test_build_source_clip_passes_target_resolution(tmp_path):
     mock_clip.h = 1280
     mock_clip.without_mask.return_value = mock_clip
     mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
 
     mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
     custom_res = (480, 640)
@@ -195,9 +202,174 @@ def test_build_source_clip_passes_target_resolution(tmp_path):
         {"moviepy.editor": types.ModuleType("moviepy.editor")},
     ):
         sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
-        build_source_clip(str(dummy), target_resolution=custom_res)
+        sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+        # transcode_proxy=False avoids calling ffmpeg in unit tests
+        build_source_clip(str(dummy), target_resolution=custom_res, transcode_proxy=False)
 
     mock_vfc_cls.assert_called_once_with(str(dummy), target_resolution=custom_res)
+
+
+def test_build_source_clip_calls_set_fps(tmp_path):
+    """build_source_clip must call .set_fps(fps) on the clip."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 30.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+
+    with mock.patch.dict(
+        "sys.modules",
+        {"moviepy.editor": types.ModuleType("moviepy.editor")},
+    ):
+        sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+        build_source_clip(str(dummy), fps=24, transcode_proxy=False)
+
+    mock_clip.set_fps.assert_called_once_with(24)
+
+
+def test_build_source_clip_uses_composite_with_black_background(tmp_path):
+    """build_source_clip must wrap the clip in CompositeVideoClip over a black ColorClip."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 13.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+    mock_color_cls = mock.MagicMock()
+    mock_bg = mock.MagicMock()
+    mock_color_cls.return_value = mock_bg
+    mock_bg.set_duration.return_value = mock_bg
+    mock_composite_cls = mock.MagicMock()
+
+    with mock.patch.dict(
+        "sys.modules",
+        {"moviepy.editor": types.ModuleType("moviepy.editor")},
+    ):
+        sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].ColorClip = mock_color_cls  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].CompositeVideoClip = mock_composite_cls  # type: ignore[attr-defined]
+        build_source_clip(str(dummy), transcode_proxy=False)
+
+    # ColorClip must be constructed with a black colour
+    mock_color_cls.assert_called_once()
+    color_kwargs = mock_color_cls.call_args[1]
+    assert color_kwargs.get("color") == (0, 0, 0), "Background must be black (0,0,0)"
+
+    # CompositeVideoClip must be called with [bg, clip] layers
+    mock_composite_cls.assert_called_once()
+    layers = mock_composite_cls.call_args[0][0]
+    assert layers[0] is mock_bg, "First layer must be the black background"
+
+
+def test_build_source_clip_transcode_proxy_calls_ffmpeg(tmp_path):
+    """When transcode_proxy=True, build_source_clip must call ffmpeg via subprocess."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    proxy = str(tmp_path / "proxy.mp4")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 13.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with mock.patch("tempfile.NamedTemporaryFile") as mock_ntf:
+            mock_ntf.return_value.__enter__.return_value.name = proxy
+            mock_ntf.return_value.__exit__ = mock.MagicMock(return_value=False)
+            with mock.patch.dict(
+                "sys.modules",
+                {"moviepy.editor": types.ModuleType("moviepy.editor")},
+            ):
+                sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+                sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+                sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+                build_source_clip(str(dummy), transcode_proxy=True)
+
+    assert "ffmpeg" in captured["cmd"], "ffmpeg must be called for proxy transcoding"
+    assert "-profile:v" in captured["cmd"]
+    idx = captured["cmd"].index("-profile:v")
+    assert captured["cmd"][idx + 1] == "baseline"
+
+
+def test_transcode_to_proxy_raises_on_missing_ffmpeg(tmp_path):
+    """_transcode_to_proxy must raise RuntimeError when ffmpeg is not found."""
+    dummy = str(tmp_path / "video.mp4")
+    (tmp_path / "video.mp4").write_bytes(b"")
+
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        with pytest.raises(RuntimeError, match="ffmpeg is not installed"):
+            _transcode_to_proxy(dummy)
+
+
+def test_transcode_to_proxy_raises_on_nonzero_exit(tmp_path):
+    """_transcode_to_proxy must raise RuntimeError when ffmpeg exits non-zero."""
+    import subprocess as _sp
+
+    dummy = str(tmp_path / "video.mp4")
+    (tmp_path / "video.mp4").write_bytes(b"")
+
+    err = _sp.CalledProcessError(1, "ffmpeg", stderr="codec error")
+    with mock.patch("subprocess.run", side_effect=err):
+        with pytest.raises(RuntimeError, match="ffmpeg proxy transcoding failed"):
+            _transcode_to_proxy(dummy)
+
+
+def test_transcode_to_proxy_ffmpeg_cmd_uses_libx264_baseline(tmp_path):
+    """_transcode_to_proxy must call ffmpeg with libx264/baseline/yuv420p."""
+    dummy = str(tmp_path / "video.mp4")
+    (tmp_path / "video.mp4").write_bytes(b"")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        _transcode_to_proxy(dummy)
+
+    cmd = captured["cmd"]
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert "-profile:v" in cmd and cmd[cmd.index("-profile:v") + 1] == "baseline"
+    assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +462,35 @@ def test_render_video_custom_ffmpeg_params(tmp_path):
 
     _, kwargs = mock_final.write_videofile.call_args
     assert kwargs["ffmpeg_params"] == custom_params
+
+
+def test_render_video_anchors_first_clip_at_zero(tmp_path):
+    """render_video must call .set_start(0) on the first clip before concatenation."""
+    output_path = str(tmp_path / "out.mp4")
+
+    mock_clip_1 = mock.MagicMock()
+    mock_clip_anchored = mock.MagicMock()
+    mock_clip_1.set_start.return_value = mock_clip_anchored
+
+    mock_clip_2 = mock.MagicMock()
+
+    mock_final = mock.MagicMock()
+    mock_concat = mock.MagicMock(return_value=mock_final)
+
+    with mock.patch.dict(
+        "sys.modules",
+        {"moviepy.editor": types.ModuleType("moviepy.editor")},
+    ):
+        sys.modules["moviepy.editor"].concatenate_videoclips = mock_concat  # type: ignore[attr-defined]
+        render_video([mock_clip_1, mock_clip_2], output_path=output_path)
+
+    mock_clip_1.set_start.assert_called_once_with(0)
+    # The anchored clip (result of set_start) must appear as the first element
+    # passed to concatenate_videoclips.
+    args, _ = mock_concat.call_args
+    passed_clips = args[0]
+    assert passed_clips[0] is mock_clip_anchored
+    assert passed_clips[1] is mock_clip_2
 
 
 # ---------------------------------------------------------------------------
