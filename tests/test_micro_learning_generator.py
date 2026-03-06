@@ -360,6 +360,21 @@ def test_coach_script_metadata_glossary_voice_is_opposite_of_narrator_female():
     assert script["metadata"]["glossary_voice"] == "en-US-AndrewNeural"
 
 
+def test_coach_script_metadata_has_title():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
+    assert "title" in script["metadata"]
+    assert isinstance(script["metadata"]["title"], str)
+    assert script["metadata"]["title"].strip()
+
+
+def test_coach_script_metadata_title_contains_keywords():
+    kws = ["commit", "branch", "merge"]
+    script = generate_language_coach_script("clip.mp4", kws, "B1")
+    title = script["metadata"]["title"]
+    for kw in kws:
+        assert kw in title
+
+
 def test_coach_script_scenes_count_is_six():
     script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
     assert len(script["scenes"]) == 6
@@ -375,19 +390,31 @@ def test_coach_script_scene_types_order():
     assert len(educational) == 3
 
 
+def test_coach_script_scenes_have_scene_ids():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
+    for i, scene in enumerate(script["scenes"], start=1):
+        assert scene.get("scene_id") == i
+
+
 # ---------------------------------------------------------------------------
 # generate_language_coach_script – scene 1 (original)
 # ---------------------------------------------------------------------------
 
 
-def test_coach_original_scene_has_duration_auto():
+def test_coach_original_scene_has_start_time():
     script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "A2")
-    assert script["scenes"][0]["duration"] == "auto"
+    assert "start_time" in script["scenes"][0]
 
 
-def test_coach_original_scene_has_duration_hint():
+def test_coach_original_scene_has_end_time():
     script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
-    assert script["scenes"][0]["duration_hint"] == "10-15s"
+    assert "end_time" in script["scenes"][0]
+
+
+def test_coach_original_scene_has_description():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
+    assert "description" in script["scenes"][0]
+    assert script["scenes"][0]["description"].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +433,12 @@ def test_coach_highlighted_keywords_match_input():
     kws = ["review", "feedback", "approve"]
     script = generate_language_coach_script("clip.mp4", kws, "B2")
     assert script["scenes"][1]["keywords"] == kws
+
+
+def test_coach_highlighted_scene_has_description():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
+    assert "description" in script["scenes"][1]
+    assert script["scenes"][1]["description"].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -457,9 +490,9 @@ def test_coach_educational_terms_match_input_keywords():
 # ---------------------------------------------------------------------------
 
 
-def test_coach_review_scene_has_duration_auto():
+def test_coach_review_scene_has_description():
     script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "A2")
-    assert script["scenes"][-1]["duration"] == "auto"
+    assert "description" in script["scenes"][-1]
 
 
 def test_coach_review_scene_has_subtitles_false():
