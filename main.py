@@ -30,6 +30,7 @@ from src.context import (
     detect_context as _detect_context,
     output_path_for_context as _output_path_for_context,
 )
+from src.video_engine import _transcode_to_proxy
 
 from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
@@ -70,15 +71,39 @@ _SATURATION_BOOST = 1.25
 _GAMMA_CORRECTION = 0.80 
 
 def _enhance_frame(frame):
-    """Mejora visual: Brillo, Contraste y Saturación."""
-    img = PIL.Image.fromarray(frame.astype(np.uint8))
+    """Mejora visual: Brillo, Contraste y Saturación.
+
+    Guarantees that the returned array is ``uint8`` with the **exact same
+    shape** as *frame* and contains no ``NaN`` values, so MoviePy's
+    ``fl_image`` pipeline never produces corrupted (black/white) frames.
+    """
+    logger.debug(
+        "_enhance_frame input: shape=%s dtype=%s", frame.shape, frame.dtype
+    )
+    safe_frame = frame.astype(np.uint8)
+    img = PIL.Image.fromarray(safe_frame)
     img = PIL.ImageEnhance.Contrast(img).enhance(_CONTRAST_BOOST)
     img = PIL.ImageEnhance.Color(img).enhance(_SATURATION_BOOST)
-    img = PIL.ImageEnhance.Brightness(img).enhance(1.1) 
-    
+    img = PIL.ImageEnhance.Brightness(img).enhance(1.1)
+
     arr = np.array(img).astype(np.float32) / 255.0
-    arr = np.power(arr, _GAMMA_CORRECTION) 
-    return np.clip(arr * 255, 0, 255).astype(np.uint8)
+    arr = np.power(arr, _GAMMA_CORRECTION)
+    # Guard against NaN / Inf that can arise from degenerate pixel values
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    result = np.clip(arr * 255, 0, 255).astype(np.uint8)
+
+    # Shape must be identical to the input; fall back to the safe cast if not
+    if result.shape != safe_frame.shape:
+        logger.warning(
+            "_enhance_frame shape mismatch: input=%s output=%s – returning original",
+            safe_frame.shape, result.shape,
+        )
+        return safe_frame
+
+    logger.debug(
+        "_enhance_frame output: shape=%s dtype=%s", result.shape, result.dtype
+    )
+    return result
 
 def _load_hook_font(size: int):
     candidates = ["C:/Windows/Fonts/montserrat-extrabold.ttf", "C:/Windows/Fonts/arialbd.ttf"]
@@ -105,52 +130,29 @@ def _make_watermark_clip(video_duration: float) -> ImageClip:
             .set_position(("center", VIDEO_H - clip.size[1] - 50)))
 
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_time=None):
+    """Build a MoviePy clip for one scene from *asset_path*.
+
+    Applies strict media validation, optional FFmpeg proxy transcoding for
+    MP4 assets (to handle AV1 / H.264 inter-frame decoding issues), frame
+    enhancement via :func:`_enhance_frame`, and explicit-background
+    compositing to guarantee fully visible frames on all players.
+
+    A visible brand-colour :class:`~moviepy.editor.ColorClip` is returned as
+    a fallback whenever the asset is missing, has invalid dimensions/duration,
+    or cannot be processed.
+    """
     if not asset_path or not os.path.exists(asset_path):
-        # OJO: Si falta el asset, devolvemos negro en vez de gris claro para evitar destellos blancos
-        return ColorClip(size=VIDEO_RES, color=(0, 0, 0), duration=duration)
+        logger.warning("⚠️ Asset not found: %s – using brand ColorClip fallback.", asset_path)
+        return ColorClip(size=VIDEO_RES, color=_BRAND_COLOR, duration=duration)
 
     ext = os.path.splitext(asset_path)[1].lower()
-    
+
     if ext == ".mp4":
-        # 1. Carga limpia
-        clip = VideoFileClip(asset_path).without_mask().set_opacity(1)
-        
-        # 2. Recorte de tiempo PRIMERO (Vital para que fl_image no busque frames inexistentes)
-        clip_start = start_time
-        clip_end = min(end_time, clip.duration) if end_time is not None else clip.duration
-        clip = clip.subclip(clip_start, clip_end)
-        actual_duration = clip.duration
-
-        # 3. Normalización de FPS y Tamaño
-        clip = clip.set_fps(24)
-        
-        # Lógica de Aspect Ratio (Crop-Fill)
-        vid_aspect = clip.w / clip.h
-        target_aspect = VIDEO_W / VIDEO_H
-        if vid_aspect > target_aspect:
-            clip = clip.resize(height=VIDEO_H)
-        else:
-            clip = clip.resize(width=VIDEO_W)
-        
-        clip = clip.crop(x_center=clip.w/2, y_center=clip.h/2, width=VIDEO_W, height=VIDEO_H)
-
-        # 4. Aplicar mejora visual (fl_image) al final de las transformaciones geométricas
-        # base = clip.fl_image(_enhance_frame)
-        base = clip
-
-        # 5. Composición Blindada
-        bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(actual_duration)
-        
-        # Usamos use_bgclip=True para que el fondo negro sea la referencia absoluta
-        final = CompositeVideoClip([bg, base.set_position("center")], 
-                                   size=VIDEO_RES, 
-                                   use_bgclip=True).set_duration(actual_duration)
-        
-        return final.set_audio(base.audio) # Aseguramos que el audio viaje con el clip final
+        return _make_video_clip(asset_path, duration, start_time, end_time)
 
     # --- Lógica para Imágenes ---
     img_clip = ImageClip(asset_path).set_duration(duration)
-    
+
     # Redimensionamos la imagen para que CUBRA todo el canvas (evita bordes)
     w, h = img_clip.size
     aspect_ratio_target = VIDEO_W / VIDEO_H
@@ -162,16 +164,133 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_t
     # Aplicamos el Zoom
     def _resize_fn(t):
         # Zoom sutil: de 1.0 a 1.1 o de 1.1 a 1.0
-        base = 1.0 + 0.1 * t/duration if zoom_in else 1.1 - 0.1 * t/duration
-        return base
+        base_scale = 1.0 + 0.1 * t / duration if zoom_in else 1.1 - 0.1 * t / duration
+        return base_scale
 
     img_clip = img_clip.resize(_resize_fn).set_position("center")
-    
+
     # CLAVE: Forzamos el CompositeVideoClip a VIDEO_RES y le ponemos un fondo negro sólido
     # Esto elimina cualquier transparencia que Instagram pueda detectar como "error de aspecto"
-    return (CompositeVideoClip([ColorClip(VIDEO_RES, color=(0,0,0)).set_duration(duration), img_clip], size=VIDEO_RES)
-            .set_duration(duration)
-            .fl_image(_enhance_frame))
+    return (
+        CompositeVideoClip(
+            [ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(duration), img_clip],
+            size=VIDEO_RES,
+        )
+        .set_duration(duration)
+        .fl_image(_enhance_frame)
+    )
+
+
+def _make_video_clip(asset_path: str, duration: float, start_time: float, end_time):
+    """Load, normalise, and composite an MP4 asset into a scene clip.
+
+    Processing pipeline:
+
+    1. **Proxy transcoding** – Re-encodes the source to ``libx264/baseline/
+       yuv420p`` via FFmpeg before MoviePy loads it.  This fixes blank/black
+       frames caused by AV1 or other inter-frame codecs with sparse I-frames.
+       If FFmpeg is unavailable the original file is loaded directly.
+    2. **Strict media validation** – Verifies that the loaded clip has
+       non-zero dimensions and a positive duration before continuing.
+    3. **Trim** – Subclips to the requested [*start_time*, *end_time*] window.
+    4. **FPS normalisation** – Forces 24 fps for consistent compositing.
+    5. **Crop-fill** – Resizes and centre-crops to exactly ``VIDEO_RES``.
+    6. **Frame enhancement** – Applies :func:`_enhance_frame` via
+       ``fl_image`` for contrast/colour/brightness improvement.
+    7. **Explicit-background compositing** – Places the enhanced clip at
+       pixel coordinates ``(0, 0)`` over a solid black
+       :class:`~moviepy.editor.ColorClip` with ``use_bgclip=True`` so the
+       render engine treats it as a concrete, fully-opaque image layer.
+    8. **Audio assignment** – Explicitly attaches the original audio track to
+       the composite to guarantee sync.
+
+    Returns a visible brand-colour :class:`~moviepy.editor.ColorClip` if any
+    step fails, logging a warning with the failure details.
+
+    Args:
+        asset_path: Path to the MP4 file.
+        duration:   Fallback duration used for the ColorClip placeholder.
+        start_time: Trim start in seconds.
+        end_time:   Trim end in seconds, or ``None`` for full clip.
+
+    Returns:
+        A :class:`~moviepy.editor.CompositeVideoClip` (or fallback
+        :class:`~moviepy.editor.ColorClip`) ready for concatenation.
+    """
+    raw_clip = None
+    try:
+        # Step 1: Proxy transcoding – forces libx264/yuv420p so MoviePy can
+        # decode every frame independently (fixes AV1 / H.264 blank frames).
+        load_path = asset_path
+        try:
+            load_path = _transcode_to_proxy(asset_path)
+            logger.debug("Proxy transcoded: %s → %s", asset_path, load_path)
+        except Exception as transcode_exc:
+            logger.warning(
+                "⚠️ Proxy transcoding skipped (%s); loading original file.", transcode_exc
+            )
+
+        # Step 2: Load and strict media validation
+        raw_clip = VideoFileClip(load_path).without_mask().set_opacity(1)
+
+        if raw_clip.w == 0 or raw_clip.h == 0 or raw_clip.duration <= 0:
+            logger.warning(
+                "⚠️ Invalid clip dimensions/duration: size=%s duration=%.2f for %s"
+                " – using visible fallback.",
+                raw_clip.size, raw_clip.duration, asset_path,
+            )
+            raw_clip.close()
+            return ColorClip(size=VIDEO_RES, color=_BRAND_COLOR, duration=duration)
+
+        logger.debug(
+            "Clip loaded: size=%s duration=%.2fs fps=%s",
+            raw_clip.size, raw_clip.duration, raw_clip.fps,
+        )
+
+        # Step 3: Trim to requested window
+        clip_start = start_time
+        clip_end = min(end_time, raw_clip.duration) if end_time is not None else raw_clip.duration
+        clip = raw_clip.subclip(clip_start, clip_end)
+        actual_duration = clip.duration
+
+        # Step 4: FPS normalisation
+        clip = clip.set_fps(24)
+
+        # Step 5: Aspect-ratio crop-fill → exact VIDEO_RES
+        vid_aspect = clip.w / clip.h
+        target_aspect = VIDEO_W / VIDEO_H
+        if vid_aspect > target_aspect:
+            clip = clip.resize(height=VIDEO_H)
+        else:
+            clip = clip.resize(width=VIDEO_W)
+        clip = clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=VIDEO_W, height=VIDEO_H)
+
+        # Step 6: Frame enhancement
+        base = clip.fl_image(_enhance_frame)
+
+        # Step 7: Explicit-background compositing with pixel coordinates
+        # After crop-fill the clip is exactly VIDEO_RES, so (0, 0) fills the canvas.
+        bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(actual_duration)
+        final = CompositeVideoClip(
+            [bg, base.set_position((0, 0))],
+            size=VIDEO_RES,
+            use_bgclip=True,
+        ).set_duration(actual_duration)
+
+        # Step 8: Attach audio to composite to guarantee sync
+        return final.set_audio(base.audio)
+
+    except Exception as exc:
+        logger.warning(
+            "⚠️ Failed to process MP4 %s: %s – using visible fallback.",
+            asset_path, exc,
+        )
+        if raw_clip is not None:
+            try:
+                raw_clip.close()
+            except Exception:
+                pass
+        return ColorClip(size=VIDEO_RES, color=_BRAND_COLOR, duration=duration)
 
 # ---------------------------------------------------------------------------
 # Micro-Learning helpers
