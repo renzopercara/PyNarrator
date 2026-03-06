@@ -21,7 +21,7 @@
       "scene_id": 2,
       "type": "highlighted",
       "text": "Now, pay attention to these three key terms used in the video.",
-      "keywords": ["proposal", "merge", "collaborate"],
+      "keywords": ["proposal", "merge", "branch"],
       "subtitles": "highlight_keywords"
     },
     {
@@ -45,11 +45,11 @@
     {
       "scene_id": 5,
       "type": "educational",
-      "term": "collaborate",
-      "definition": "To work jointly on an activity or project.",
-      "it_example": "Developers use PRs to collaborate on new features.",
+      "term": "branch",
+      "definition": "An independent line of development isolated from the main codebase.",
+      "it_example": "Create a feature branch to isolate your changes.",
       "narrator_voice": "en-US-AvaNeural",
-      "image_prompt": "team of developers working together"
+      "image_prompt": "git branch diagram showing diverging code paths"
     },
     {
       "scene_id": 6,
