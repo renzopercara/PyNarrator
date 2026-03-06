@@ -1,22 +1,45 @@
 """video_engine.py – Video download, clip-building and render helpers for PyNarrator.
 
-Centralises the three core video operations required by the micro-learning
+Centralises the four core video operations required by the micro-learning
 workflow:
 
-* :func:`download_video`      – Downloads a YouTube clip via ``yt-dlp`` using
-                                the best available MP4 + M4A audio format.
-* :func:`_transcode_to_proxy` – Re-encodes a video to ``libx264/baseline/yuv420p``
-                                via ``ffmpeg`` before loading.  This is the "proxy
-                                trick" that prevents blank/white frames caused by
-                                AV1 inter-frame decoding issues in MoviePy.
-* :func:`build_source_clip`   – Loads a local MP4 file, optionally transcodes it
-                                to a proxy, normalises resolution, strips alpha,
-                                fixes FPS, trims the clip, and composites it over
-                                a solid black background to guarantee visible frames.
-* :func:`render_video`        – Concatenates scene clips with
-                                ``method="compose"`` (prevents audio-stream
-                                cancellation) and writes the final file with
-                                ``yuv420p`` pixel format for maximum compatibility.
+* :func:`download_video`          – Downloads a YouTube clip via ``yt-dlp`` using
+                                    the best available MP4 + M4A audio format.
+* :func:`normalize_youtube_clip`  – Trims **and** re-encodes a YouTube clip to
+                                    ``libx264/yuv420p/aac`` in a **single FFmpeg
+                                    pass**.  This is the recommended pre-processing
+                                    step before handing the file to MoviePy.
+* :func:`_transcode_to_proxy`     – Re-encodes a video to ``libx264/baseline/yuv420p``
+                                    via ``ffmpeg`` before loading.  This is the "proxy
+                                    trick" that prevents blank/white frames caused by
+                                    AV1 inter-frame decoding issues in MoviePy.
+* :func:`build_source_clip`       – Loads a local MP4 file, optionally pre-processes it
+                                    via :func:`normalize_youtube_clip` (single-pass trim
+                                    + normalise) or :func:`_transcode_to_proxy`
+                                    (full-file normalise), then normalises resolution,
+                                    strips alpha, fixes FPS, and composites it over a
+                                    solid black background to guarantee visible frames.
+* :func:`render_video`            – Concatenates scene clips with
+                                    ``method="compose"`` (prevents audio-stream
+                                    cancellation) and writes the final file with
+                                    ``yuv420p`` pixel format for maximum compatibility.
+
+Normalisation pipeline (recommended for YouTube clips)
+------------------------------------------------------
+The recommended pipeline for YouTube clips is:
+
+1. ``download_video`` – fetch the raw file with ``yt-dlp``.
+2. ``normalize_youtube_clip`` – trim to the desired window **and** re-encode
+   with ``libx264/yuv420p/aac`` in a single FFmpeg pass.  The normalised file
+   is written to ``assets/tmp/youtube_normalized.mp4`` by default.
+3. ``build_source_clip`` – load the normalised file, apply resolution/FPS
+   normalisation, strip alpha, and composite over a black background.
+4. ``render_video`` – concatenate and write the final MP4.
+
+:func:`build_source_clip` automatically invokes :func:`normalize_youtube_clip`
+instead of :func:`_transcode_to_proxy` when *transcode_proxy* is ``True`` and
+*end_time* is specified (the common YouTube-clip scenario), collapsing trim +
+normalise into one FFmpeg pass for efficiency.
 
 Pixel-format fix
 ----------------
@@ -50,13 +73,20 @@ different sources (YouTube audio vs. Edge-TTS).
 
 Usage::
 
-    from src.video_engine import download_video, build_source_clip, render_video
+    from src.video_engine import download_video, normalize_youtube_clip, build_source_clip, render_video
 
-    local_path = download_video(
+    raw_path = download_video(
         url="https://www.youtube.com/watch?v=nCKdihvneS0",
-        output_dir="assets/video",
+        output_dir="assets/tmp",
+        filename="youtube_raw.mp4",
     )
-    clip = build_source_clip(local_path, start_time=13, end_time=26)
+    normalized_path = normalize_youtube_clip(
+        input_path=raw_path,
+        output_path="assets/tmp/youtube_normalized.mp4",
+        start="13",
+        end="26",
+    )
+    clip = build_source_clip(normalized_path, start_time=0, end_time=13)
     render_video([clip], output_path="output/lesson.mp4")
 """
 
@@ -87,6 +117,86 @@ _FFMPEG_PARAMS = [
     "-pix_fmt", "yuv420p",
     "-movflags", "+faststart",
 ]
+
+# Temporary directory used to store intermediate YouTube processing files
+# (``youtube_raw.mp4`` and ``youtube_normalized.mp4``).  Created on demand.
+_TMP_DIR = os.path.join("assets", "tmp")
+
+
+def normalize_youtube_clip(
+    input_path: str,
+    output_path: str,
+    start: str,
+    end: str,
+) -> str:
+    """Trim and normalise a YouTube clip using a single FFmpeg pass.
+
+    Runs FFmpeg to cut the source video to the window [*start*, *end*] **and**
+    re-encode it with ``libx264/yuv420p/aac`` in one pass.  This is the
+    recommended pre-processing step before handing the file to MoviePy because:
+
+    * FFmpeg aligns the output to a key-frame boundary, preventing the
+      blank/black-frame artefacts that occur when MoviePy subclips an AV1
+      (or other inter-frame codec) source.
+    * The ``yuv420p`` pixel format is universally supported by all players and
+      by MoviePy's colour-compositing pipeline.
+    * A single pass is more efficient than normalising the full file first and
+      then trimming (the previous two-step approach).
+
+    The parent directory of *output_path* is created automatically if it does
+    not exist (including ``assets/tmp/`` for the default pipeline).
+
+    Args:
+        input_path:  Path to the raw downloaded video file (e.g.
+                     ``"assets/tmp/youtube_raw.mp4"``).
+        output_path: Destination path for the normalised clip (e.g.
+                     ``"assets/tmp/youtube_normalized.mp4"``).
+        start:       Start time as an integer/float in seconds **or** an
+                     ``HH:MM:SS`` string (e.g. ``"13"`` or ``"00:00:13"``).
+        end:         End time in the same format as *start* (e.g. ``"26"``
+                     or ``"00:00:26"``).
+
+    Returns:
+        *output_path* – the path to the normalised MP4 file – for convenience
+        in call chains.
+
+    Raises:
+        RuntimeError: If ``ffmpeg`` is not installed or normalisation fails.
+    """
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-ss", str(start),
+        "-to", str(end),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        output_path,
+    ]
+
+    logger.info(
+        "🎬 Normalizing YouTube clip: %s [%s → %s] → %s",
+        input_path, start, end, output_path,
+    )
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logger.debug("ffmpeg stdout: %s", result.stdout)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffmpeg is not installed or not on PATH. "
+            "Install it with: apt install ffmpeg  (or brew install ffmpeg on macOS)"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"ffmpeg normalize_youtube_clip failed (exit {exc.returncode}): {exc.stderr}"
+        ) from exc
+
+    logger.info("✅ Normalized clip ready: %s", output_path)
+    return output_path
 
 
 def _transcode_to_proxy(input_path: str) -> str:
@@ -216,16 +326,24 @@ def build_source_clip(
     target_resolution: tuple[int, int] = _TARGET_RESOLUTION,
     fps: int = 24,
     transcode_proxy: bool = True,
+    tmp_dir: str = _TMP_DIR,
 ):
     """Load a local MP4 file as a normalised MoviePy clip ready for concatenation.
 
     Applies the following fixes in order:
 
-    1. **Proxy transcoding** – When *transcode_proxy* is ``True`` (default),
-       the source file is first re-encoded to a ``libx264/baseline/yuv420p``
-       proxy via :func:`_transcode_to_proxy`.  This prevents MoviePy from
-       encountering inter-frame codec issues (e.g. AV1) that produce
-       blank/white frames after subclipping.
+    1. **FFmpeg pre-processing** – When *transcode_proxy* is ``True`` (default):
+
+       * If *end_time* is provided (the common YouTube-clip scenario), calls
+         :func:`normalize_youtube_clip` to **trim and re-encode** the clip in
+         a single FFmpeg pass.  The normalised file is written to
+         ``<tmp_dir>/youtube_normalized.mp4``.  This is the most reliable
+         approach because FFmpeg aligns output to a key-frame boundary and
+         forces ``yuv420p``, preventing blank/black-frame artefacts caused by
+         AV1 inter-frame decoding.
+       * If *end_time* is ``None``, falls back to :func:`_transcode_to_proxy`
+         (full-file normalise to ``libx264/baseline/yuv420p``).
+
     2. **Resolution normalisation** – ``target_resolution`` is passed to
        :class:`~moviepy.editor.VideoFileClip` so that the decoder scales
        the frame during demux.  This avoids mismatched frame sizes when
@@ -234,12 +352,16 @@ def build_source_clip(
        and ``.set_opacity(1)`` strip any residual alpha channel.
     4. **FPS normalisation** – ``.set_fps(fps)`` sets a consistent frame rate
        across all clips before compositing (default: 24 fps).
-    5. **Time trimming** – The clip is subclipped to [*start_time*, *end_time*].
+    5. **Explicit duration** – When the clip was pre-trimmed by
+       :func:`normalize_youtube_clip`, ``set_duration`` is called with the
+       expected duration for reliability.  Otherwise ``subclip`` is used.
     6. **Explicit background compositing** – The trimmed clip is placed over a
        solid black :class:`~moviepy.editor.ColorClip` background using
        :class:`~moviepy.editor.CompositeVideoClip`.  This forces the render
        engine to treat the video as a concrete image layer and eliminates
        white-transparency artefacts.
+    7. **Audio assignment** – The audio track from the loaded clip is explicitly
+       assigned to the composite to guarantee sync.
 
     Args:
         path:              Absolute or relative path to the MP4 file.
@@ -249,11 +371,13 @@ def build_source_clip(
         target_resolution: ``(height, width)`` tuple for resolution
                            normalisation (default: ``(720, 1280)``).
         fps:               Target frames per second (default: 24).
-        transcode_proxy:   When ``True`` (default), re-encode to a libx264
-                           proxy before loading to avoid AV1 blank-frame bugs.
-                           The proxy temp file is managed by the OS and will
-                           be cleaned up on reboot or by standard temp-dir
-                           housekeeping (see :func:`_transcode_to_proxy`).
+        transcode_proxy:   When ``True`` (default), pre-process with FFmpeg
+                           before loading to avoid AV1 blank-frame bugs.  When
+                           *end_time* is set, uses :func:`normalize_youtube_clip`
+                           (one-pass trim + normalise); otherwise uses
+                           :func:`_transcode_to_proxy` (full-file normalise).
+        tmp_dir:           Directory for intermediate normalised files (default:
+                           ``assets/tmp``).  Created automatically if absent.
 
     Returns:
         A :class:`~moviepy.editor.CompositeVideoClip` ready for concatenation.
@@ -261,7 +385,7 @@ def build_source_clip(
     Raises:
         FileNotFoundError: If *path* does not exist.
         ValueError:        If *start_time* is negative or *end_time* ≤ *start_time*.
-        RuntimeError:      If proxy transcoding fails (only when
+        RuntimeError:      If FFmpeg pre-processing fails (only when
                            *transcode_proxy* is ``True``).
     """
     if not os.path.exists(path):
@@ -275,10 +399,22 @@ def build_source_clip(
 
     from moviepy.editor import ColorClip, CompositeVideoClip, VideoFileClip
 
-    # Proxy trick: re-encode to libx264/baseline/yuv420p so MoviePy can decode
-    # all frames correctly, even after subclipping an AV1-encoded YouTube video.
+    # FFmpeg pre-processing: normalise codec/pixel-format before MoviePy loads
+    # the file.  This prevents blank/black-frame artefacts caused by AV1
+    # inter-frame decoding issues and colour-space mismatches.
     load_path = path
-    if transcode_proxy:
+    already_trimmed = False
+    if transcode_proxy and end_time is not None:
+        # One-pass approach: trim + normalise with FFmpeg.
+        # More efficient and reliable than normalising first, then subclipping.
+        os.makedirs(tmp_dir, exist_ok=True)
+        normalized_path = os.path.join(tmp_dir, "youtube_normalized.mp4")
+        load_path = normalize_youtube_clip(
+            path, normalized_path, str(start_time), str(end_time)
+        )
+        already_trimmed = True
+    elif transcode_proxy:
+        # Fall back to full-file proxy transcoding when no trim window given.
         load_path = _transcode_to_proxy(path)
 
     logger.info(
@@ -294,9 +430,14 @@ def build_source_clip(
     # Normalise FPS across all clips to avoid sync issues during compositing.
     clip = clip.set_fps(fps)
 
-    # Trim to requested window
-    clip_end = min(end_time, clip.duration) if end_time is not None else clip.duration
-    clip = clip.subclip(start_time, clip_end)
+    if already_trimmed:
+        # Clip is pre-trimmed by FFmpeg; set explicit duration for reliability.
+        explicit_duration = end_time - start_time
+        clip = clip.set_duration(min(explicit_duration, clip.duration))
+    else:
+        # Trim to requested window via MoviePy.
+        clip_end = min(end_time, clip.duration) if end_time is not None else clip.duration
+        clip = clip.subclip(start_time, clip_end)
 
     # Explicit background compositing: place the clip over a solid black
     # ColorClip.  This forces the render engine to treat the video as a
@@ -306,6 +447,9 @@ def build_source_clip(
         color=(0, 0, 0),
     ).set_duration(clip.duration)
     composite = CompositeVideoClip([bg, clip.set_position("center")])
+
+    # Explicitly assign audio from the loaded clip to guarantee sync.
+    composite.audio = clip.audio
 
     logger.info("✅ Clip ready: %.2fs", composite.duration)
     return composite
