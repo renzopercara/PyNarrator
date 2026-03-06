@@ -319,6 +319,7 @@ def generate_language_coach_script(
 
         {
             "metadata": {
+                "title": "PR Language Coach: <kw1>, <kw2> & <kw3>",
                 "tone": "Professional Tech",
                 "language": "en-US",
                 "cefr_level": "<level>",
@@ -327,12 +328,16 @@ def generate_language_coach_script(
             },
             "video_source": "<path_or_url>",
             "scenes": [
-                {"type": "original",     "duration": "auto", "duration_hint": "10-15s"},
-                {"type": "highlighted",  "keywords": [...]},
-                {"type": "educational",  "term": "...", "definition": "...",
-                 "it_example": "...", "narrator_voice": "en-US-AvaNeural"},
-                ...  (one per keyword)
-                {"type": "review",       "duration": "auto", "subtitles": false}
+                {"scene_id": 1, "type": "original", "start_time": "00:00:00",
+                 "end_time": "00:00:15", "description": "Original context clip"},
+                {"scene_id": 2, "type": "highlighted", "keywords": [...],
+                 "description": "Visual identification of key terms found in this PR"},
+                {"scene_id": 3, "type": "educational", "term": "...",
+                 "definition": "...", "it_example": "...",
+                 "narrator_voice": "en-US-AvaNeural"},
+                ...  (one per keyword, scene_id 3-5)
+                {"scene_id": 6, "type": "review", "subtitles": false,
+                 "description": "Final listening challenge without text"}
             ]
         }
 
@@ -378,15 +383,33 @@ def generate_language_coach_script(
                 f"Valid keywords: {', '.join(sorted(_KEYWORD_KNOWLEDGE))}."
             )
 
+    # Build a short descriptive title from the keywords
+    if len(keywords) >= 2:
+        title = "PR Language Coach: " + ", ".join(keywords[:-1]) + " & " + keywords[-1]
+    else:
+        title = "PR Language Coach: " + keywords[0]
+
     scenes: list[dict] = [
-        {"type": "original", "duration": "auto", "duration_hint": "10-15s"},
-        {"type": "highlighted", "keywords": list(keywords)},
+        {
+            "scene_id": 1,
+            "type": "original",
+            "start_time": "00:00:00",
+            "end_time": "00:00:15",
+            "description": "Original context clip",
+        },
+        {
+            "scene_id": 2,
+            "type": "highlighted",
+            "keywords": list(keywords),
+            "description": "Visual identification of key terms found in this PR",
+        },
     ]
 
-    for kw in keywords:
+    for idx, kw in enumerate(keywords, start=3):
         info = _KEYWORD_KNOWLEDGE[kw]
         scenes.append(
             {
+                "scene_id": idx,
                 "type": "educational",
                 "term": kw,
                 "definition": info["definition"],
@@ -395,10 +418,18 @@ def generate_language_coach_script(
             }
         )
 
-    scenes.append({"type": "review", "duration": "auto", "subtitles": False})
+    scenes.append(
+        {
+            "scene_id": len(scenes) + 1,
+            "type": "review",
+            "subtitles": False,
+            "description": "Final listening challenge without text",
+        }
+    )
 
     return {
         "metadata": {
+            "title": title,
             "tone": "Professional Tech",
             "language": "en-US",
             "cefr_level": level_key,
