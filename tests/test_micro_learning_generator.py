@@ -411,6 +411,55 @@ def test_coach_original_scene_has_end_time():
     assert "end_time" in script["scenes"][0]
 
 
+def test_coach_original_scene_default_start_end_times_are_integers():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
+    assert isinstance(script["scenes"][0]["start_time"], int)
+    assert isinstance(script["scenes"][0]["end_time"], int)
+
+
+def test_coach_original_scene_custom_start_end_times():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1", start_time=13, end_time=26)
+    assert script["scenes"][0]["start_time"] == 13
+    assert script["scenes"][0]["end_time"] == 26
+
+
+def test_coach_original_scene_clip_max_15_seconds():
+    script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1", start_time=13, end_time=26)
+    scene = script["scenes"][0]
+    clip_duration = scene["end_time"] - scene["start_time"]
+    assert clip_duration <= 15, f"Clip duration {clip_duration}s exceeds 15s micro-learning limit"
+
+
+def test_coach_proposal_merge_collaborate_keywords_accepted():
+    kws = ["proposal", "merge", "collaborate"]
+    script = generate_language_coach_script("clip.mp4", kws, "B1")
+    assert len(script["scenes"]) == 6
+    edu_terms = [s["term"] for s in script["scenes"] if s["type"] == "educational"]
+    assert edu_terms == kws
+
+
+def test_coach_proposal_knowledge_has_required_fields():
+    from src.micro_learning_generator import _KEYWORD_KNOWLEDGE
+    info = _KEYWORD_KNOWLEDGE["proposal"]
+    assert "definition" in info and info["definition"].strip()
+    assert "it_example" in info and info["it_example"].strip()
+
+
+def test_coach_collaborate_knowledge_has_required_fields():
+    from src.micro_learning_generator import _KEYWORD_KNOWLEDGE
+    info = _KEYWORD_KNOWLEDGE["collaborate"]
+    assert "definition" in info and info["definition"].strip()
+    assert "it_example" in info and info["it_example"].strip()
+
+
+def test_coach_json_start_end_times_roundtrip():
+    output = generate_language_coach_json("clip.mp4", _SAMPLE_KEYWORDS, "B1", start_time=13, end_time=26)
+    parsed = json.loads(output)
+    scene1 = parsed["scenes"][0]
+    assert scene1["start_time"] == 13
+    assert scene1["end_time"] == 26
+
+
 def test_coach_original_scene_has_description():
     script = generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1")
     assert "description" in script["scenes"][0]
@@ -526,6 +575,16 @@ def test_coach_invalid_cefr_level_raises():
 def test_coach_invalid_narrator_voice_raises():
     with pytest.raises(ValueError):
         generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1", narrator_voice="X")
+
+
+def test_coach_clip_exceeds_15s_raises():
+    with pytest.raises(ValueError):
+        generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1", start_time=0, end_time=16)
+
+
+def test_coach_clip_zero_duration_raises():
+    with pytest.raises(ValueError):
+        generate_language_coach_script("clip.mp4", _SAMPLE_KEYWORDS, "B1", start_time=13, end_time=13)
 
 
 # ---------------------------------------------------------------------------
