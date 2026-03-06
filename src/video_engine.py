@@ -269,21 +269,32 @@ def download_video(
     properly muxed audio stream – a prerequisite for :func:`build_source_clip`
     to extract audio without extra post-processing.
 
+    After the download completes the function verifies that the file actually
+    exists at *output_path*.  When yt-dlp writes to a slightly different path
+    (e.g. it appends the video-ID or a different extension) the newest ``.mp4``
+    file in *output_dir* is used instead.  This prevents the "Asset not found"
+    fallback that occurs when the caller passes the URL directly to the render
+    pipeline without a prior download step.
+
     Args:
         url:        YouTube (or other yt-dlp-compatible) URL.
         output_dir: Directory where the downloaded file will be saved.
+                    Resolved to an absolute path automatically.
         filename:   Output filename (must end with ``.mp4``).
 
     Returns:
         Absolute path to the downloaded MP4 file.
 
     Raises:
-        RuntimeError: If ``yt-dlp`` is not installed or the download fails.
+        RuntimeError: If ``yt-dlp`` is not installed or the download fails,
+                      or if no MP4 file can be found in *output_dir* after
+                      the download.
         ValueError:   If *url* is empty.
     """
     if not url:
         raise ValueError("url must not be empty.")
 
+    output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
 
@@ -314,6 +325,28 @@ def download_video(
         raise RuntimeError(
             f"yt-dlp failed (exit {exc.returncode}): {exc.stderr}"
         ) from exc
+
+    # Verify the file exists at the expected path.  yt-dlp occasionally writes
+    # to a slightly different name (e.g. when the URL resolves to a different
+    # video ID or when the container extension differs).  Fall back to the
+    # newest MP4 in output_dir so the caller always gets a valid local path.
+    if not os.path.exists(output_path):
+        logger.warning(
+            "⚠️ Expected download path not found: %s – searching %s for the newest MP4.",
+            output_path, output_dir,
+        )
+        mp4_files = [
+            os.path.join(output_dir, f)
+            for f in os.listdir(output_dir)
+            if f.lower().endswith(".mp4")
+        ]
+        if not mp4_files:
+            raise RuntimeError(
+                f"Downloaded file not found at expected path and no MP4 files "
+                f"discovered in {output_dir}. yt-dlp output: {result.stdout}"
+            )
+        output_path = max(mp4_files, key=os.path.getmtime)
+        logger.info("📂 Using discovered download: %s", output_path)
 
     logger.info("✅ Download complete: %s", output_path)
     return output_path

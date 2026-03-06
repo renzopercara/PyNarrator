@@ -84,16 +84,18 @@ def test_download_video_raises_on_nonzero_exit(tmp_path):
 def test_download_video_passes_correct_format(tmp_path):
     """The yt-dlp command must include the correct --format argument."""
     captured = {}
+    expected_path = str(tmp_path / "source.mp4")
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        # Simulate yt-dlp writing the file so the post-download existence
+        # check in download_video passes without error.
+        open(expected_path, "wb").close()
         result = mock.MagicMock()
         result.stdout = ""
         return result
 
     with mock.patch("subprocess.run", side_effect=fake_run):
-        # Also mock the returned path check – download_video returns the path
-        # without verifying its existence.
         download_video("https://example.com/video", output_dir=str(tmp_path))
 
     cmd = captured["cmd"]
@@ -105,8 +107,11 @@ def test_download_video_passes_correct_format(tmp_path):
 def test_download_video_creates_output_dir(tmp_path):
     """download_video creates output_dir if it does not exist."""
     new_dir = str(tmp_path / "new" / "nested")
+    expected_path = os.path.join(new_dir, "source.mp4")
 
     def fake_run(cmd, **kwargs):
+        # Simulate yt-dlp writing the file so the post-download check passes.
+        open(expected_path, "wb").close()
         result = mock.MagicMock()
         result.stdout = ""
         return result
@@ -117,9 +122,55 @@ def test_download_video_creates_output_dir(tmp_path):
     assert os.path.isdir(new_dir)
 
 
-# ---------------------------------------------------------------------------
-# build_source_clip
-# ---------------------------------------------------------------------------
+def test_download_video_returns_absolute_path(tmp_path):
+    """download_video must return an absolute path regardless of input."""
+    expected_path = str(tmp_path / "source.mp4")
+
+    def fake_run(cmd, **kwargs):
+        open(expected_path, "wb").close()
+        result = mock.MagicMock()
+        result.stdout = ""
+        return result
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        returned = download_video("https://example.com/video", output_dir=str(tmp_path))
+
+    assert os.path.isabs(returned), "download_video must return an absolute path"
+
+
+def test_download_video_falls_back_to_newest_mp4_when_expected_path_missing(tmp_path):
+    """When the expected output path is not found, download_video should fall
+    back to the newest .mp4 in the output directory (yt-dlp renamed the file)."""
+    alternate_path = str(tmp_path / "vHBrMxIEEwY.mp4")
+
+    def fake_run(cmd, **kwargs):
+        # yt-dlp wrote to a different name than requested
+        open(alternate_path, "wb").close()
+        result = mock.MagicMock()
+        result.stdout = ""
+        return result
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        returned = download_video(
+            "https://example.com/video",
+            output_dir=str(tmp_path),
+            filename="source.mp4",   # expected name that won't be created
+        )
+
+    assert returned == alternate_path
+
+
+def test_download_video_raises_when_no_mp4_found_after_download(tmp_path):
+    """RuntimeError is raised when no .mp4 exists in output_dir after download."""
+    def fake_run(cmd, **kwargs):
+        # yt-dlp runs but writes nothing
+        result = mock.MagicMock()
+        result.stdout = ""
+        return result
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with pytest.raises(RuntimeError, match="Downloaded file not found"):
+            download_video("https://example.com/video", output_dir=str(tmp_path))
 
 
 def test_build_source_clip_raises_on_missing_file():
