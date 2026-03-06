@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import random
+import textwrap
 import numpy as np
 import PIL.Image
 import PIL.ImageDraw
@@ -23,6 +24,7 @@ from src.config import (
     OUTPUT_DIR, AUDIO_DIR,
     MUSIC_DIR, SFX_DIR, VIDEO_RES, LOGO_PATH,
     WATERMARK_PATH, WATERMARK_OPACITY, WATERMARK_WIDTH_PERCENT,
+    VOICES, ESL_VOICE_RATE, ESL_VOICE_PITCH,
 )
 from src.context import (
     detect_context as _detect_context,
@@ -136,12 +138,326 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True):
             .set_duration(duration)
             .fl_image(_enhance_frame))
 
+# ---------------------------------------------------------------------------
+# Micro-Learning helpers
+# ---------------------------------------------------------------------------
+
+# Card colour palette
+_EDU_BG_COLOR = (15, 20, 50)        # Deep navy background
+_EDU_TERM_COLOR = (255, 215, 0)     # Gold for the keyword term
+_EDU_LABEL_COLOR = (120, 180, 255)  # Light blue for section labels
+_EDU_BODY_COLOR = (240, 240, 240)   # Near-white for body text
+
+_EDU_CARD_PADDING = 90              # px from canvas edge
+_EDU_LINE_SPACING = 14              # extra px between wrapped lines
+
+
+def _wrap_text_to_lines(draw, text: str, font, max_width: int) -> list[str]:
+    """Wrap *text* into lines that fit within *max_width* pixels."""
+    words = text.split()
+    lines: list[str] = []
+    current: list[str] = []
+    for word in words:
+        test = " ".join(current + [word])
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] > max_width and current:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def _make_educational_card(term: str, definition: str, example: str, duration: float) -> ImageClip:
+    """Create a vocabulary educational card as a MoviePy :class:`ImageClip`.
+
+    The card shows:
+      - The keyword term (gold, large)
+      - A "DEFINITION" section with the plain-English explanation
+      - An "EXAMPLE" section with a real IT usage example
+
+    Args:
+        term:       The technical keyword.
+        definition: Plain-English definition of the term.
+        example:    IT usage example sentence.
+        duration:   Duration of the resulting clip in seconds.
+
+    Returns:
+        A :class:`~moviepy.editor.ImageClip` of size :data:`VIDEO_RES`.
+    """
+    font_term = _load_hook_font(88)
+    font_label = _load_hook_font(48)
+    font_body = _load_hook_font(52)
+
+    img = PIL.Image.new("RGB", VIDEO_RES, _EDU_BG_COLOR)
+    draw = PIL.ImageDraw.Draw(img)
+
+    max_text_w = VIDEO_W - 2 * _EDU_CARD_PADDING
+    y = int(VIDEO_H * 0.12)
+
+    # ── Term ────────────────────────────────────────────────────────────────
+    term_upper = term.upper()
+    bbox = draw.textbbox((0, 0), term_upper, font=font_term)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    draw.text(
+        ((VIDEO_W - tw) // 2, y),
+        term_upper, font=font_term, fill=_EDU_TERM_COLOR,
+        stroke_width=4, stroke_fill=(0, 0, 0),
+    )
+    y += th + 60
+
+    # ── Divider ─────────────────────────────────────────────────────────────
+    draw.line(
+        [(_EDU_CARD_PADDING, y), (VIDEO_W - _EDU_CARD_PADDING, y)],
+        fill=_EDU_TERM_COLOR, width=4,
+    )
+    y += 50
+
+    # ── Definition label ────────────────────────────────────────────────────
+    draw.text((_EDU_CARD_PADDING, y), "DEFINITION", font=font_label, fill=_EDU_LABEL_COLOR)
+    bbox = draw.textbbox((0, 0), "DEFINITION", font=font_label)
+    y += (bbox[3] - bbox[1]) + 28
+
+    # ── Definition body ─────────────────────────────────────────────────────
+    for line in _wrap_text_to_lines(draw, definition, font_body, max_text_w):
+        draw.text((_EDU_CARD_PADDING, y), line, font=font_body, fill=_EDU_BODY_COLOR)
+        bbox = draw.textbbox((0, 0), line, font=font_body)
+        y += (bbox[3] - bbox[1]) + _EDU_LINE_SPACING
+    y += 55
+
+    # ── Divider ─────────────────────────────────────────────────────────────
+    draw.line(
+        [(_EDU_CARD_PADDING, y), (VIDEO_W - _EDU_CARD_PADDING, y)],
+        fill=_EDU_LABEL_COLOR, width=2,
+    )
+    y += 50
+
+    # ── Example label ───────────────────────────────────────────────────────
+    draw.text((_EDU_CARD_PADDING, y), "EXAMPLE", font=font_label, fill=_EDU_LABEL_COLOR)
+    bbox = draw.textbbox((0, 0), "EXAMPLE", font=font_label)
+    y += (bbox[3] - bbox[1]) + 28
+
+    # ── Example body ─────────────────────────────────────────────────────────
+    for line in _wrap_text_to_lines(draw, example, font_body, max_text_w):
+        draw.text((_EDU_CARD_PADDING, y), line, font=font_body, fill=_EDU_BODY_COLOR)
+        bbox = draw.textbbox((0, 0), line, font=font_body)
+        y += (bbox[3] - bbox[1]) + _EDU_LINE_SPACING
+
+    return ImageClip(np.array(img)).set_duration(duration)
+
+
+def _is_micro_learning_script(script) -> bool:
+    """Return True if *script* follows the micro-learning JSON format.
+
+    The micro-learning format is a :class:`dict` with both ``"metadata"`` and
+    ``"scenes"`` keys, as opposed to the legacy flat list format.
+    """
+    return isinstance(script, dict) and "metadata" in script and "scenes" in script
+
+
+async def _generate_edu_audio(text: str, voice_key: str, idx: int) -> str:
+    """Generate a TTS audio file for an educational scene narration.
+
+    Uses the ESL rate (``-5%``) and pitch (``+0Hz``) defined in
+    :mod:`src.config` for maximum educational clarity.
+
+    Args:
+        text:      The text to synthesise (definition + example).
+        voice_key: ``"H"`` (male ``en-US-AndrewNeural``) or ``"M"`` (female
+                   ``en-US-AvaNeural``).
+        idx:       Scene index used to derive a unique filename.
+
+    Returns:
+        Absolute path to the saved ``.mp3`` file.
+    """
+    import edge_tts
+
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    voice_name = VOICES.get(voice_key, VOICES["H"])
+    path = os.path.join(AUDIO_DIR, f"edu_{idx:04d}.mp3")
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice_name,
+        rate=ESL_VOICE_RATE,
+        pitch=ESL_VOICE_PITCH,
+    )
+    await communicate.save(path)
+    return path
+
+
+async def main_micro_learning(script: dict) -> None:
+    """Process and render a micro-learning video from a structured script dict.
+
+    Handles the four scene types defined by the micro-learning workflow:
+
+    * ``"original"``    – Loads ``video_source`` as a clip (no new TTS).
+    * ``"highlighted"`` – Same as ``"original"``; the ``keywords`` field is
+                          stored in the clip's metadata for potential downstream
+                          subtitle highlighting.
+    * ``"educational"`` – Renders a vocabulary card image with TTS narration
+                          voiced by the *opposite* gender from the original
+                          narrator (SLA best practice).
+    * ``"review"``      – Repeats the ``video_source`` clip without distractions.
+
+    Args:
+        script: Micro-learning script dict (as produced by
+                :func:`src.micro_learning_generator.generate_micro_learning_script`).
+    """
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    metadata = script.get("metadata", {})
+    video_source = script.get("video_source", "")
+    scenes = script.get("scenes", [])
+
+    tone = metadata.get("tone", "INFORMATIVE")
+    narrator_voice = metadata.get("narrator_voice", "H")
+
+    # Determine duration of the source video clip
+    src_duration = 5.0
+    src_video_clip = None
+    if video_source and os.path.exists(video_source):
+        src_video_clip = VideoFileClip(video_source)
+        src_duration = src_video_clip.duration
+        src_video_clip.close()
+        src_video_clip = None
+
+    output_path = _output_path_for_context("esl")
+    logger.info("🎬 Micro-Learning script detected → %s", output_path)
+
+    scene_clips = []
+    edu_audio_paths = []
+
+    try:
+        for i, scene in enumerate(scenes):
+            scene_type = scene.get("type", "")
+
+            if scene_type in ("original", "highlighted", "review"):
+                # Load the video source directly – no Pexels/Unsplash lookup
+                clip = _make_clip_for_scene(video_source, src_duration, zoom_in=False)
+                if scene_clips:
+                    clip = clip.crossfadein(0.4)
+                scene_clips.append(clip)
+                logger.info("▶ Scene %d (%s): loaded video_source (%.1fs)", i, scene_type, src_duration)
+
+            elif scene_type == "educational":
+                term = scene.get("term", "")
+                definition = scene.get("definition", "")
+                example = scene.get("example", "")
+                edu_voice = scene.get("narrator_voice", "M" if narrator_voice == "H" else "H")
+
+                # Compose the narration text: "<term>. <definition> For example: <example>"
+                narration = f"{term}. {definition} For example: {example}"
+                audio_path = await _generate_edu_audio(narration, edu_voice, i)
+                edu_audio_paths.append(audio_path)
+
+                audio_clip = AudioFileClip(audio_path)
+                edu_duration = audio_clip.duration
+                audio_clip.close()
+
+                card = _make_educational_card(term, definition, example, edu_duration)
+                card = card.set_audio(AudioFileClip(audio_path))
+                if scene_clips:
+                    card = card.crossfadein(0.4)
+                scene_clips.append(card)
+                logger.info(
+                    "📚 Scene %d (educational): '%s' voiced by %s (%.1fs)",
+                    i, term, edu_voice, edu_duration,
+                )
+
+            else:
+                logger.warning("⚠️ Unknown scene type '%s' at index %d – skipping.", scene_type, i)
+
+        if not scene_clips:
+            logger.error("❌ No scene clips were generated. Aborting.")
+            return
+
+        final_video = concatenate_videoclips(scene_clips, method="compose")
+
+        # Optional watermark
+        watermark = _make_watermark_clip(final_video.duration)
+        layers = [final_video]
+        if watermark:
+            layers.append(watermark)
+        final_video = CompositeVideoClip(layers, size=VIDEO_RES)
+
+        # Background music (optional)
+        tone_music_dir = os.path.join(MUSIC_DIR, tone.lower())
+        m_files = (
+            [os.path.join(tone_music_dir, f) for f in os.listdir(tone_music_dir) if f.endswith((".mp3", ".wav"))]
+            if os.path.isdir(tone_music_dir) else []
+        )
+        if not m_files:
+            m_files = [os.path.join(MUSIC_DIR, f) for f in os.listdir(MUSIC_DIR) if f.endswith((".mp3", ".wav"))]
+
+        if m_files:
+            bg_music = (
+                AudioFileClip(random.choice(m_files))
+                .fx(afx.audio_loop, duration=final_video.duration)
+                .volumex(0.08)
+                .audio_fadeout(2.0)
+            )
+            existing_audio = final_video.audio
+            if existing_audio is not None:
+                final_video = final_video.set_audio(
+                    CompositeAudioClip([existing_audio, bg_music])
+                )
+            else:
+                final_video = final_video.set_audio(bg_music)
+
+        logger.info("💾 Exporting micro-learning to: %s", output_path)
+        final_video.write_videofile(
+            output_path,
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=os.path.join(OUTPUT_DIR, "temp-audio.m4a"),
+            remove_temp=True,
+            threads=4,
+            logger=None,
+            verbose=False,
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-vf", "setsar=1:1",
+                "-movflags", "+faststart",
+                "-profile:v", "high",
+                "-level", "4.0",
+            ],
+        )
+        logger.info("✅ Micro-learning complete!")
+
+    finally:
+        try:
+            final_video.close()
+        except Exception:
+            pass
+        for clip in scene_clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        for path in edu_audio_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+
 async def main():
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     try:
         with open("script.json", "r", encoding="utf-8") as f:
             script = json.load(f)
+
+        # Dispatch: micro-learning format (dict with metadata + scenes) vs. legacy list
+        if _is_micro_learning_script(script):
+            await main_micro_learning(script)
+            return
 
         context = _detect_context(script)
         output_path = _output_path_for_context(context)

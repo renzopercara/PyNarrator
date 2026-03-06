@@ -10,15 +10,17 @@ logger = logging.getLogger(__name__)
 
 # Voice rate adjustments per tone (edge-tts rate string format)
 _TONE_VOICE_RATE: dict[str, str] = {
-    "ENERGICO": "+20%",     # faster, higher energy
-    "INFORMATIVO": "+0%",   # neutral default
-    "RELAJADO": "-15%",     # slower, calmer
+    "ENERGICO": "+20%",      # faster, higher energy
+    "INFORMATIVO": "+0%",    # neutral default
+    "INFORMATIVE": "-5%",    # ESL/educational: slower for maximum clarity
+    "RELAJADO": "-15%",      # slower, calmer
 }
 
 # Voice pitch adjustments per tone
 _TONE_VOICE_PITCH: dict[str, str] = {
     "ENERGICO": "+5Hz",
     "INFORMATIVO": "+0Hz",
+    "INFORMATIVE": "+0Hz",   # ESL/educational: natural pitch for clarity
     "RELAJADO": "-5Hz",
 }
 
