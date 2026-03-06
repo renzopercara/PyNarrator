@@ -381,3 +381,79 @@ def test_make_video_clip_returns_colorclip_for_zero_dimension_clip(tmp_path):
 
     assert isinstance(clip, ColorClip), "Expected ColorClip fallback for zero-dimension clip"
     mock_clip.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_video_source – URL detection and download
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_video_source_returns_empty_string_unchanged():
+    """_resolve_video_source('') must return '' without attempting a download."""
+    from main import _resolve_video_source
+
+    assert _resolve_video_source("") == ""
+
+
+def test_resolve_video_source_local_path_returned_as_absolute(tmp_path):
+    """_resolve_video_source with a local file path resolves it to absolute."""
+    from main import _resolve_video_source
+
+    local_file = tmp_path / "clip.mp4"
+    local_file.write_bytes(b"")
+    result = _resolve_video_source(str(local_file))
+    assert os.path.isabs(result), "Expected an absolute path"
+    assert result == str(local_file.resolve())
+
+
+def test_resolve_video_source_detects_http_url(tmp_path, monkeypatch):
+    """_resolve_video_source must call download_video for http:// URLs."""
+    import main as main_module
+    from main import _resolve_video_source
+
+    downloaded_file = tmp_path / "youtube_raw.mp4"
+    downloaded_file.write_bytes(b"")
+    download_mock = mock.Mock(return_value=str(downloaded_file))
+    monkeypatch.setattr(main_module, "download_video", download_mock)
+
+    result = _resolve_video_source("http://example.com/video", tmp_dir=str(tmp_path))
+
+    download_mock.assert_called_once()
+    assert os.path.isabs(result)
+
+
+def test_resolve_video_source_detects_https_url(tmp_path, monkeypatch):
+    """_resolve_video_source must call download_video for https:// URLs."""
+    import main as main_module
+    from main import _resolve_video_source
+
+    downloaded_file = tmp_path / "youtube_raw.mp4"
+    downloaded_file.write_bytes(b"")
+    download_mock = mock.Mock(return_value=str(downloaded_file))
+    monkeypatch.setattr(main_module, "download_video", download_mock)
+
+    result = _resolve_video_source("https://www.youtube.com/watch?v=vHBrMxIEEwY", tmp_dir=str(tmp_path))
+
+    download_mock.assert_called_once_with(
+        url="https://www.youtube.com/watch?v=vHBrMxIEEwY",
+        output_dir=str(tmp_path),
+        filename="youtube_raw.mp4",
+    )
+    assert result == str(downloaded_file.resolve())
+
+
+def test_resolve_video_source_returns_url_on_download_failure(tmp_path, monkeypatch):
+    """When download_video raises, _resolve_video_source returns the original URL."""
+    import main as main_module
+    from main import _resolve_video_source
+
+    monkeypatch.setattr(
+        main_module, "download_video", mock.Mock(side_effect=RuntimeError("network error"))
+    )
+
+    url = "https://www.youtube.com/watch?v=vHBrMxIEEwY"
+    result = _resolve_video_source(url, tmp_dir=str(tmp_path))
+
+    # On failure the original URL is returned so the caller's fallback path
+    # (ColorClip) is triggered with an appropriate warning already logged.
+    assert result == url

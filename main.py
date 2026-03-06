@@ -30,7 +30,7 @@ from src.context import (
     detect_context as _detect_context,
     output_path_for_context as _output_path_for_context,
 )
-from src.video_engine import _transcode_to_proxy
+from src.video_engine import _transcode_to_proxy, download_video
 
 from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
@@ -129,6 +129,63 @@ def _make_watermark_clip(video_duration: float) -> ImageClip:
     return (clip.set_opacity(WATERMARK_OPACITY).set_duration(video_duration)
             .set_position(("center", VIDEO_H - clip.size[1] - 50)))
 
+
+def _resolve_video_source(video_source: str, tmp_dir: str = "assets/tmp") -> str:
+    """Return a local file path for *video_source*.
+
+    When *video_source* is a URL (starts with ``http://`` or ``https://``),
+    downloads the video via :func:`~src.video_engine.download_video` into
+    *tmp_dir* and returns the absolute path to the downloaded file.  For
+    local paths the value is returned unchanged (after resolving to an
+    absolute path if it already exists on disk).
+
+    This function is the entry-point fix for the "Asset not found for YouTube
+    URLs" bug: the micro-learning pipeline stores a raw YouTube URL in
+    ``video_source``; without this helper the URL is passed directly to
+    :func:`_make_clip_for_scene` which cannot ``os.path.exists()`` a URL
+    and silently falls back to a blank :class:`~moviepy.editor.ColorClip`.
+
+    Args:
+        video_source: A YouTube URL or a local file path.
+        tmp_dir:      Directory used for the downloaded file (created
+                      automatically if absent).
+
+    Returns:
+        Absolute local path to the video file, or *video_source* unchanged
+        if the download fails (the caller's fallback logic will then produce
+        a brand-colour placeholder clip and log a clear warning).
+    """
+    if not video_source:
+        return video_source
+
+    if video_source.startswith(("http://", "https://")):
+        logger.info("🌐 YouTube URL detected in video_source – downloading: %s", video_source)
+        try:
+            local_path = download_video(
+                url=video_source,
+                output_dir=tmp_dir,
+                filename="youtube_raw.mp4",
+            )
+            abs_path = os.path.abspath(local_path)
+            logger.info("✅ video_source resolved to local path: %s", abs_path)
+            return abs_path
+        except Exception as exc:
+            logger.error(
+                "❌ Failed to download video_source '%s': %s – pipeline will use ColorClip fallback.",
+                video_source, exc,
+            )
+            return video_source
+
+    # Local path: resolve to absolute so downstream checks are consistent.
+    abs_path = os.path.abspath(video_source)
+    if not os.path.exists(abs_path):
+        logger.warning(
+            "⚠️ video_source local path does not exist: %s (searched: %s)",
+            video_source, abs_path,
+        )
+    return abs_path
+
+
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_time=None):
     """Build a MoviePy clip for one scene from *asset_path*.
 
@@ -142,7 +199,11 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_t
     or cannot be processed.
     """
     if not asset_path or not os.path.exists(asset_path):
-        logger.warning("⚠️ Asset not found: %s – using brand ColorClip fallback.", asset_path)
+        logger.warning(
+            "⚠️ Asset not found: '%s' (absolute: '%s') – using brand ColorClip fallback.",
+            asset_path,
+            os.path.abspath(asset_path) if asset_path else "<None>",
+        )
         return ColorClip(size=VIDEO_RES, color=_BRAND_COLOR, duration=duration)
 
     ext = os.path.splitext(asset_path)[1].lower()
@@ -464,11 +525,17 @@ async def main_micro_learning(script: dict) -> None:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     metadata = script.get("metadata", {})
-    video_source = script.get("video_source", "")
+    raw_video_source = script.get("video_source", "")
     scenes = script.get("scenes", [])
 
     tone = metadata.get("tone", "INFORMATIVE")
     narrator_voice = metadata.get("narrator_voice", "H")
+
+    # Resolve video_source: download from YouTube if it is a URL, otherwise
+    # convert to an absolute local path.  This is the core fix for the
+    # "Asset not found for YouTube URLs" bug.
+    tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tmp")
+    video_source = _resolve_video_source(raw_video_source, tmp_dir=tmp_dir)
 
     # Determine duration of the source video clip
     src_duration = 5.0
@@ -478,6 +545,16 @@ async def main_micro_learning(script: dict) -> None:
         src_duration = src_video_clip.duration
         src_video_clip.close()
         src_video_clip = None
+        logger.info(
+            "📹 video_source resolved | Path: %s | Duration: %.2fs",
+            video_source, src_duration,
+        )
+    else:
+        logger.warning(
+            "⚠️ video_source not found on disk after resolution attempt: '%s' "
+            "(original: '%s') – scenes will use ColorClip fallback.",
+            video_source, raw_video_source,
+        )
 
     output_path = _output_path_for_context("esl")
     logger.info("🎬 Micro-Learning script detected → %s", output_path)
@@ -496,6 +573,12 @@ async def main_micro_learning(script: dict) -> None:
                 # Fallback duration is used only for non-MP4 assets (e.g. ColorClip)
                 fallback_duration = (
                     (scene_end - scene_start) if scene_end is not None else src_duration
+                )
+                logger.info(
+                    "[Processing Scene %d] Type: %s | Path: %s | Duration: %.1fs"
+                    " | Window: %ss–%ss | Resolution: %s",
+                    i, scene_type, video_source, fallback_duration,
+                    scene_start, scene_end if scene_end is not None else "end", VIDEO_RES,
                 )
                 clip = _make_clip_for_scene(
                     video_source, fallback_duration, zoom_in=False,
