@@ -106,35 +106,47 @@ def _make_watermark_clip(video_duration: float) -> ImageClip:
 
 def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_time=None):
     if not asset_path or not os.path.exists(asset_path):
-        return ColorClip(size=VIDEO_RES, color=(240, 240, 240), duration=duration)
+        # OJO: Si falta el asset, devolvemos negro en vez de gris claro para evitar destellos blancos
+        return ColorClip(size=VIDEO_RES, color=(0, 0, 0), duration=duration)
 
     ext = os.path.splitext(asset_path)[1].lower()
     
     if ext == ".mp4":
-        clip = VideoFileClip(asset_path)
-        # Normalise: strip any alpha mask, enforce full opacity and consistent FPS
-        # to prevent white/blank frames on YouTube and social-media players.
-        clip = clip.without_mask().set_opacity(1).resize(height=720).set_fps(24)
-        # Trim to the requested time window (supports start_time / end_time in seconds)
+        # 1. Carga limpia
+        clip = VideoFileClip(asset_path).without_mask().set_opacity(1)
+        
+        # 2. Recorte de tiempo PRIMERO (Vital para que fl_image no busque frames inexistentes)
         clip_start = start_time
         clip_end = min(end_time, clip.duration) if end_time is not None else clip.duration
         clip = clip.subclip(clip_start, clip_end)
-        duration = clip.duration
-        # Crop-Fill: escalar para cubrir el eje menor y recortar el eje mayor.
-        # Esto garantiza que no queden bordes de 1 píxel ni transparencias.
+        actual_duration = clip.duration
+
+        # 3. Normalización de FPS y Tamaño
+        clip = clip.set_fps(24)
+        
+        # Lógica de Aspect Ratio (Crop-Fill)
         vid_aspect = clip.w / clip.h
         target_aspect = VIDEO_W / VIDEO_H
         if vid_aspect > target_aspect:
-            # Video más ancho que 9:16: ajustar por altura y recortar ancho sobrante
             clip = clip.resize(height=VIDEO_H)
         else:
-            # Video más alto o igual: ajustar por ancho y recortar alto sobrante
             clip = clip.resize(width=VIDEO_W)
+        
         clip = clip.crop(x_center=clip.w/2, y_center=clip.h/2, width=VIDEO_W, height=VIDEO_H)
-        base = clip.fl_image(_enhance_frame)
-        # Fondo negro sólido para eliminar cualquier transparencia residual
-        bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(duration)
-        return CompositeVideoClip([bg, base.set_position("center")], size=VIDEO_RES).set_duration(duration)
+
+        # 4. Aplicar mejora visual (fl_image) al final de las transformaciones geométricas
+        # base = clip.fl_image(_enhance_frame)
+        base = clip
+
+        # 5. Composición Blindada
+        bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(actual_duration)
+        
+        # Usamos use_bgclip=True para que el fondo negro sea la referencia absoluta
+        final = CompositeVideoClip([bg, base.set_position("center")], 
+                                   size=VIDEO_RES, 
+                                   use_bgclip=True).set_duration(actual_duration)
+        
+        return final.set_audio(base.audio) # Aseguramos que el audio viaje con el clip final
 
     # --- Lógica para Imágenes ---
     img_clip = ImageClip(asset_path).set_duration(duration)
