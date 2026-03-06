@@ -47,6 +47,22 @@ logger = logging.getLogger(__name__)
 
 VIDEO_W, VIDEO_H = VIDEO_RES
 
+# --- PLATFORM RESOLUTIONS ---
+# Maps a "target platform" name to its (width, height) render resolution.
+_PLATFORM_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "Instagram": (1080, 1920),
+    "LinkedIn": (1080, 1080),
+}
+
+# Current target resolution – updated at the start of main() based on the
+# chosen platform.  Helper functions that need the render size read from
+# this variable so the whole pipeline stays consistent.
+_TARGET_RESOLUTION: tuple[int, int] = VIDEO_RES
+
+# Smartbuild brand colour used as a fallback background when visual assets
+# are unavailable (deep-navy blue).
+_BRAND_COLOR: tuple[int, int, int] = (15, 20, 50)
+
 # --- CONSTANTES DE ESTILO OPTIMIZADAS ---
 _ZOOM_RATE_NORMAL = 0.02
 _CONTRAST_BOOST = 1.15   
@@ -468,8 +484,28 @@ async def main_micro_learning(script: dict) -> None:
                 pass
 
 
-async def main():
-    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
+async def main(target_platform: str = "Instagram") -> None:
+    """Render the video described by ``script.json``.
+
+    Args:
+        target_platform: Output resolution preset.  Supported values are
+            ``"Instagram"`` (1080×1920 vertical) and ``"LinkedIn"``
+            (1080×1080 square).  Defaults to ``"Instagram"``.
+    """
+    global _TARGET_RESOLUTION
+    _TARGET_RESOLUTION = _PLATFORM_RESOLUTIONS.get(target_platform, VIDEO_RES)
+    logger.info("🎯 Target platform: %s → resolution %s", target_platform, _TARGET_RESOLUTION)
+
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # All AudioFileClip / VideoFileClip objects created during this run are
+    # collected here so they can be closed in the finally block even if an
+    # error occurs mid-render.
+    media_clips: list = []
+    scene_clips: list = []
+    base_video = None
+    final_video = None
 
     try:
         with open("script.json", "r", encoding="utf-8") as f:
@@ -478,6 +514,13 @@ async def main():
         # Dispatch: micro-learning format (dict with metadata + scenes) vs. legacy list
         if _is_micro_learning_script(script):
             await main_micro_learning(script)
+            # Generate social copy from micro-learning scenes.
+            scenes_as_list = [
+                {"keyword": s.get("term", ""), "texto": s.get("definition", "")}
+                for s in script.get("scenes", [])
+                if s.get("term") or s.get("definition")
+            ]
+            _save_social_post(generate_social_copy(scenes_as_list))
             return
 
         context = _detect_context(script)
@@ -487,17 +530,36 @@ async def main():
         tone = analyze_tone(script)
         narrator = ArgentineNarrator()
         voice_data = await narrator.generate_voice_overs(script, tone=tone)
-        visual_assets = get_visual_assets(script, tone=tone)
+
+        # --- Asset error handling: fall back to brand-colour ColorClips ----
+        try:
+            visual_assets = get_visual_assets(script, tone=tone)
+            if not visual_assets:
+                raise ValueError(
+                    "get_visual_assets returned an empty list; falling back to brand color clips"
+                )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ get_visual_assets failed (%s) – using brand ColorClips as fallback.", exc
+            )
+            visual_assets = [None] * len(voice_data)
 
         # 1. Video Base
-        scene_clips = []
         zoom_in = True
         for data, asset in zip(voice_data, visual_assets):
-            clip = _make_clip_for_scene(asset, data["duracion"], zoom_in)
-            if scene_clips: clip = clip.crossfadein(0.4)
+            if asset is None:
+                clip = ColorClip(
+                    size=_TARGET_RESOLUTION,
+                    color=_BRAND_COLOR,
+                    duration=data["duracion"],
+                )
+            else:
+                clip = _make_clip_for_scene(asset, data["duracion"], zoom_in)
+            if scene_clips:
+                clip = clip.crossfadein(0.4)
             scene_clips.append(clip)
             zoom_in = not zoom_in
-        
+
         base_video = concatenate_videoclips(scene_clips, method="compose")
         audio_path = os.path.join(AUDIO_DIR, "final_voice.mp3")
 
@@ -507,15 +569,17 @@ async def main():
         )
         hook_clip = _make_hook_clip((script[0].get("keyword") or context).strip())
         watermark = _make_watermark_clip(base_video.duration)
-        
+
         layers = [base_video]
-        if watermark: layers.append(watermark)
-        
-        final_video = CompositeVideoClip(layers + subtitle_clips + [hook_clip], size=VIDEO_RES)
+        if watermark:
+            layers.append(watermark)
+
+        final_video = CompositeVideoClip(layers + subtitle_clips + [hook_clip], size=_TARGET_RESOLUTION)
 
         # 3. Mezcla de Audio (CORREGIDO)
         logger.info("🔊 Mezclando capas de audio...")
         voice_audio = AudioFileClip(audio_path).volumex(1.4)
+        media_clips.append(voice_audio)
         audio_layers = [voice_audio]
 
         # Música de Fondo
@@ -528,31 +592,36 @@ async def main():
             bg_music = (AudioFileClip(random.choice(m_files))
                         .fx(afx.audio_loop, duration=final_video.duration)
                         .volumex(0.08).audio_fadeout(2.0))
+            media_clips.append(bg_music)
             audio_layers.append(bg_music)
 
         # Efectos (Ambiente y Pops)
         a_path = os.path.join(SFX_DIR, "ambience_construction.mp3")
         if os.path.exists(a_path):
-            audio_layers.append(AudioFileClip(a_path).fx(afx.audio_loop, duration=final_video.duration).volumex(0.03))
-        
+            amb_clip = AudioFileClip(a_path).fx(afx.audio_loop, duration=final_video.duration).volumex(0.03)
+            media_clips.append(amb_clip)
+            audio_layers.append(amb_clip)
+
         p_path = os.path.join(SFX_DIR, "pop.mp3")
         if os.path.exists(p_path):
             for t in sentence_start_times:
-                audio_layers.append(AudioFileClip(p_path).volumex(0.15).set_start(t))
+                pop_clip = AudioFileClip(p_path).volumex(0.15).set_start(t)
+                media_clips.append(pop_clip)
+                audio_layers.append(pop_clip)
 
         final_video = final_video.set_audio(CompositeAudioClip(audio_layers))
 
         # 4. Render Final
-        logger.info(f"💾 Exportando a: {output_path}")
+        logger.info("💾 Exportando a: %s", output_path)
         final_video.write_videofile(
             output_path,
-            fps=24, 
-            codec="libx264", 
-            audio_codec="aac", 
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
             temp_audiofile=os.path.join(OUTPUT_DIR, "temp-audio.m4a"),
-            remove_temp=True, 
-            threads=4, 
-            logger=None, 
+            remove_temp=True,
+            threads=4,
+            logger=None,
             verbose=False,
             ffmpeg_params=[
                 "-pix_fmt", "yuv420p",      # Color compatible con todos los celulares
@@ -564,13 +633,55 @@ async def main():
         )
         logger.info("✅ ¡Proceso completado!")
 
+        # 5. Social copy
+        _save_social_post(generate_social_copy(script))
+
     finally:
-        # Limpieza manual para evitar bloqueos de archivos
-        try:
-            final_video.close()
-            base_video.close()
-            for c in scene_clips: c.close()
-        except: pass
+        # Explicit close of every AudioFileClip / VideoFileClip to prevent
+        # file-handle leaks even when an error occurs mid-render.
+        for obj in media_clips:
+            try:
+                obj.close()
+            except Exception:
+                pass
+        if final_video is not None:
+            try:
+                final_video.close()
+            except Exception:
+                pass
+        if base_video is not None:
+            try:
+                base_video.close()
+            except Exception:
+                pass
+        for c in scene_clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def _save_social_post(info_file_path: str) -> None:
+    """Copy the generated social copy to ``output/social_post.txt``.
+
+    ``generate_social_copy`` already writes to ``output/INFO_POSTEO.txt``.
+    This helper additionally saves the same content as ``social_post.txt``
+    so users can find it alongside the rendered video without hunting for
+    the original file.
+
+    Args:
+        info_file_path: Path returned by :func:`~src.copy_generator.generate_social_copy`.
+    """
+    social_post_path = os.path.join(OUTPUT_DIR, "social_post.txt")
+    try:
+        with open(info_file_path, "r", encoding="utf-8") as src_fh:
+            content = src_fh.read()
+        with open(social_post_path, "w", encoding="utf-8") as dst_fh:
+            dst_fh.write(content)
+        logger.info("📋 Social post saved to: %s", social_post_path)
+    except Exception as exc:
+        logger.warning("⚠️ No se pudo guardar social_post.txt: %s", exc)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
