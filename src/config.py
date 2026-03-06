@@ -22,11 +22,15 @@ MUSIC_CORPORATE_DIR = os.path.join(MUSIC_DIR, "corporate") # Tono: INFORMATIVO
 SFX_DIR = os.path.join(ASSETS_DIR, "sfx")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-# Configuración de Voces Argentinas (Edge-TTS / Azure)
+# Configuración de Voces Americanas (Edge-TTS / Azure)
 VOICES = {
-    "H": "es-AR-TomasNeural",
-    "M": "es-AR-ElenaNeural"
+    "H": "en-US-AndrewNeural",  # Warm, professional, clear voice – podcast style
+    "M": "en-US-AvaNeural",     # Bright, natural, expressive voice – narrator style
 }
+
+# ESL / Micro-Learning voice settings for maximum educational clarity
+ESL_VOICE_RATE = "-5%"
+ESL_VOICE_PITCH = "+0Hz"
 
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 WATERMARK_PATH = os.path.join(ASSETS_DIR, "logo.png")
