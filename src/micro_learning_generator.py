@@ -90,6 +90,16 @@ _KEYWORD_KNOWLEDGE: dict[str, dict[str, str]] = {
         "example": "After approval, merge your feature branch into the main branch.",
         "it_example": "Merge only after all reviewers approve the PR.",
     },
+    "proposal": {
+        "definition": "A formal plan or suggestion put forward for consideration by others.",
+        "example": "A pull request is a proposal to merge a set of changes from one branch into another.",
+        "it_example": "A Pull Request is a proposal to change the code.",
+    },
+    "collaborate": {
+        "definition": "To work jointly with others on an activity or shared project.",
+        "example": "Use pull requests to collaborate with your team and discuss proposed changes.",
+        "it_example": "Developers use PRs to collaborate on new features.",
+    },
     "commit": {
         "definition": "A snapshot of changes saved permanently in the version control history.",
         "example": "Run 'git commit -m \"fix: resolve null pointer\"' to record your changes.",
@@ -299,6 +309,8 @@ def generate_language_coach_script(
     keywords: list[str],
     cefr_level: str,
     narrator_voice: str = "H",
+    start_time: int = 0,
+    end_time: int = 15,
 ) -> dict:
     """Return a Language Coach micro-lesson JSON structure as a Python dict.
 
@@ -328,8 +340,8 @@ def generate_language_coach_script(
             },
             "video_source": "<path_or_url>",
             "scenes": [
-                {"scene_id": 1, "type": "original", "start_time": "00:00:00",
-                 "end_time": "00:00:15", "description": "Original context clip"},
+                {"scene_id": 1, "type": "original", "start_time": 0,
+                 "end_time": 15, "description": "Original context clip"},
                 {"scene_id": 2, "type": "highlighted", "keywords": [...],
                  "description": "Visual identification of key terms found in this PR"},
                 {"scene_id": 3, "type": "educational", "term": "...",
@@ -349,6 +361,10 @@ def generate_language_coach_script(
         cefr_level:     Target CEFR level (``"A2"``–``"C1"``).
         narrator_voice: Voice key of the original video narrator (``"H"`` or
                         ``"M"``).  Educational scenes will use the opposite key.
+        start_time:     Start time of the source clip in seconds (default: 0).
+        end_time:       End time of the source clip in seconds (default: 15).
+                        The resulting clip must be no longer than 15 seconds to
+                        maintain the micro-learning format.
 
     Returns:
         A dict ready to be serialised with :func:`json.dumps`.
@@ -383,6 +399,15 @@ def generate_language_coach_script(
                 f"Valid keywords: {', '.join(sorted(_KEYWORD_KNOWLEDGE))}."
             )
 
+    # Enforce micro-learning clip length constraint (≤ 15 s)
+    _MAX_CLIP_SECONDS = 15
+    clip_duration = end_time - start_time
+    if clip_duration <= 0 or clip_duration > _MAX_CLIP_SECONDS:
+        raise ValueError(
+            f"Clip duration {clip_duration}s (start_time={start_time}, end_time={end_time}) "
+            f"must be between 1 and {_MAX_CLIP_SECONDS} seconds for micro-learning format."
+        )
+
     # Build a short descriptive title from the keywords
     if len(keywords) >= 2:
         title = "PR Language Coach: " + ", ".join(keywords[:-1]) + " & " + keywords[-1]
@@ -393,8 +418,8 @@ def generate_language_coach_script(
         {
             "scene_id": 1,
             "type": "original",
-            "start_time": "00:00:00",
-            "end_time": "00:00:15",
+            "start_time": start_time,
+            "end_time": end_time,
             "description": "Original context clip",
         },
         {
@@ -447,6 +472,8 @@ def generate_language_coach_json(
     cefr_level: str,
     narrator_voice: str = "H",
     indent: int = 2,
+    start_time: int = 0,
+    end_time: int = 15,
 ) -> str:
     """Return the Language Coach script as a formatted JSON string.
 
@@ -460,11 +487,16 @@ def generate_language_coach_json(
         cefr_level:     Target CEFR level.
         narrator_voice: Voice key of the original narrator (``"H"`` or ``"M"``).
         indent:         JSON indentation level (default: 2).
+        start_time:     Start time of the source clip in seconds (default: 0).
+        end_time:       End time of the source clip in seconds (default: 15).
 
     Returns:
         A valid JSON string.
     """
-    script = generate_language_coach_script(video_source, keywords, cefr_level, narrator_voice)
+    script = generate_language_coach_script(
+        video_source, keywords, cefr_level, narrator_voice,
+        start_time=start_time, end_time=end_time,
+    )
     return json.dumps(script, ensure_ascii=False, indent=indent)
 
 

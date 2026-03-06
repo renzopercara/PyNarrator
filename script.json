@@ -12,8 +12,9 @@
     {
       "scene_id": 1,
       "type": "original",
-      "text": "Watch the original clip to understand the context of Pull Requests.",
-      "duration_hint": "10-15s",
+      "start_time": 13,
+      "end_time": 26,
+      "description": "Original context clip: GitHub narrator defines a Pull Request",
       "subtitles": true
     },
     {
