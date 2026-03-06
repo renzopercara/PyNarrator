@@ -12,10 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.video_engine import (
     _FFMPEG_PARAMS,
     _TARGET_RESOLUTION,
+    _TMP_DIR,
     _YTDLP_FORMAT,
     _transcode_to_proxy,
     build_source_clip,
     download_video,
+    normalize_youtube_clip,
     render_video,
 )
 
@@ -370,6 +372,305 @@ def test_transcode_to_proxy_ffmpeg_cmd_uses_libx264_baseline(tmp_path):
     assert "-profile:v" in cmd and cmd[cmd.index("-profile:v") + 1] == "baseline"
     assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
     assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
+
+
+# ---------------------------------------------------------------------------
+# _TMP_DIR constant
+# ---------------------------------------------------------------------------
+
+
+def test_tmp_dir_constant_points_to_assets_tmp():
+    assert os.path.normpath(_TMP_DIR) == os.path.normpath(os.path.join("assets", "tmp"))
+
+
+# ---------------------------------------------------------------------------
+# normalize_youtube_clip
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_youtube_clip_raises_on_missing_ffmpeg(tmp_path):
+    """normalize_youtube_clip must raise RuntimeError when ffmpeg is not found."""
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    output_path = str(tmp_path / "normalized.mp4")
+
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        with pytest.raises(RuntimeError, match="ffmpeg is not installed"):
+            normalize_youtube_clip(input_path, output_path, "13", "26")
+
+
+def test_normalize_youtube_clip_raises_on_nonzero_exit(tmp_path):
+    """normalize_youtube_clip must raise RuntimeError when ffmpeg exits non-zero."""
+    import subprocess as _sp
+
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    output_path = str(tmp_path / "normalized.mp4")
+
+    err = _sp.CalledProcessError(1, "ffmpeg", stderr="codec error")
+    with mock.patch("subprocess.run", side_effect=err):
+        with pytest.raises(RuntimeError, match="ffmpeg normalize_youtube_clip failed"):
+            normalize_youtube_clip(input_path, output_path, "13", "26")
+
+
+def test_normalize_youtube_clip_ffmpeg_cmd_includes_ss_and_to(tmp_path):
+    """normalize_youtube_clip must pass -ss and -to to ffmpeg."""
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    output_path = str(tmp_path / "normalized.mp4")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        normalize_youtube_clip(input_path, output_path, "13", "26")
+
+    cmd = captured["cmd"]
+    assert "-ss" in cmd and cmd[cmd.index("-ss") + 1] == "13"
+    assert "-to" in cmd and cmd[cmd.index("-to") + 1] == "26"
+
+
+def test_normalize_youtube_clip_ffmpeg_cmd_uses_libx264_yuv420p_aac(tmp_path):
+    """normalize_youtube_clip must encode with libx264, yuv420p, aac."""
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    output_path = str(tmp_path / "normalized.mp4")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        normalize_youtube_clip(input_path, output_path, "13", "26")
+
+    cmd = captured["cmd"]
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
+
+
+def test_normalize_youtube_clip_creates_output_dir(tmp_path):
+    """normalize_youtube_clip must create the output directory if absent."""
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    nested_dir = tmp_path / "assets" / "tmp"
+    output_path = str(nested_dir / "youtube_normalized.mp4")
+
+    def fake_run(cmd, **kwargs):
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        normalize_youtube_clip(input_path, output_path, "0", "13")
+
+    assert os.path.isdir(str(nested_dir))
+
+
+def test_normalize_youtube_clip_returns_output_path(tmp_path):
+    """normalize_youtube_clip must return output_path for call-chain convenience."""
+    input_path = str(tmp_path / "raw.mp4")
+    (tmp_path / "raw.mp4").write_bytes(b"")
+    output_path = str(tmp_path / "normalized.mp4")
+
+    def fake_run(cmd, **kwargs):
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        result = normalize_youtube_clip(input_path, output_path, "13", "26")
+
+    assert result == output_path
+
+
+# ---------------------------------------------------------------------------
+# build_source_clip – normalize_youtube_clip integration
+# ---------------------------------------------------------------------------
+
+
+def test_build_source_clip_uses_normalize_youtube_clip_when_end_time_given(tmp_path):
+    """When transcode_proxy=True and end_time is set, build_source_clip must use
+    normalize_youtube_clip (one-pass FFmpeg trim + normalise) instead of
+    _transcode_to_proxy."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 13.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with mock.patch.dict(
+            "sys.modules",
+            {"moviepy.editor": types.ModuleType("moviepy.editor")},
+        ):
+            sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+            build_source_clip(
+                str(dummy), start_time=13, end_time=26,
+                transcode_proxy=True, tmp_dir=str(tmp_path),
+            )
+
+    # Must have called ffmpeg with -ss and -to (normalize_youtube_clip behaviour)
+    cmd = captured.get("cmd", [])
+    assert "ffmpeg" in cmd
+    assert "-ss" in cmd
+    assert "-to" in cmd
+    # Must NOT include -profile:v baseline (that is _transcode_to_proxy behaviour)
+    assert "-profile:v" not in cmd
+
+
+def test_build_source_clip_uses_transcode_proxy_when_no_end_time(tmp_path):
+    """When transcode_proxy=True but end_time is None, _transcode_to_proxy is used."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 30.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with mock.patch("tempfile.NamedTemporaryFile") as mock_ntf:
+            mock_ntf.return_value.__enter__.return_value.name = str(tmp_path / "proxy.mp4")
+            mock_ntf.return_value.__exit__ = mock.MagicMock(return_value=False)
+            with mock.patch.dict(
+                "sys.modules",
+                {"moviepy.editor": types.ModuleType("moviepy.editor")},
+            ):
+                sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+                sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+                sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+                build_source_clip(str(dummy), transcode_proxy=True)
+
+    # Must use _transcode_to_proxy path: includes -profile:v baseline
+    cmd = captured.get("cmd", [])
+    assert "ffmpeg" in cmd
+    assert "-profile:v" in cmd
+    assert cmd[cmd.index("-profile:v") + 1] == "baseline"
+
+
+def test_build_source_clip_sets_explicit_duration_when_pretrimmed(tmp_path):
+    """When normalize_youtube_clip pre-trims the clip, set_duration must be called."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 13.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+
+    def fake_run(cmd, **kwargs):
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with mock.patch.dict(
+            "sys.modules",
+            {"moviepy.editor": types.ModuleType("moviepy.editor")},
+        ):
+            sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+            build_source_clip(
+                str(dummy), start_time=13, end_time=26,
+                transcode_proxy=True, tmp_dir=str(tmp_path),
+            )
+
+    # set_duration must be called when clip is pre-trimmed (not subclip)
+    mock_clip.set_duration.assert_called_once()
+
+
+def test_build_source_clip_assigns_audio_to_composite(tmp_path):
+    """build_source_clip must assign clip.audio to the composite for guaranteed sync."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 13.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_audio = mock.MagicMock()
+    mock_clip.audio = mock_audio
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+    mock_composite_inst = mock.MagicMock()
+    mock_composite_cls = mock.MagicMock(return_value=mock_composite_inst)
+
+    def fake_run(cmd, **kwargs):
+        r = mock.MagicMock()
+        r.stdout = ""
+        return r
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        with mock.patch.dict(
+            "sys.modules",
+            {"moviepy.editor": types.ModuleType("moviepy.editor")},
+        ):
+            sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+            sys.modules["moviepy.editor"].CompositeVideoClip = mock_composite_cls  # type: ignore[attr-defined]
+            build_source_clip(
+                str(dummy), start_time=13, end_time=26,
+                transcode_proxy=True, tmp_dir=str(tmp_path),
+            )
+
+    # composite.audio must be set to clip.audio
+    assert mock_composite_inst.audio is mock_audio
 
 
 # ---------------------------------------------------------------------------

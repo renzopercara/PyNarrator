@@ -1,1 +1,3 @@
 __pycache__/
+# Temporary YouTube processing files (youtube_raw.mp4, youtube_normalized.mp4)
+assets/tmp/*.mp4
