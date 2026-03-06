@@ -117,8 +117,8 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_t
         clip = clip.crop(x_center=clip.w/2, y_center=clip.h/2, width=VIDEO_W, height=VIDEO_H)
         base = clip.fl_image(_enhance_frame)
         # Fondo negro sólido para eliminar cualquier transparencia residual
-        bg = ColorClip(VIDEO_RES, color=(0, 0, 0))
-        return CompositeVideoClip([bg, base], size=VIDEO_RES).set_duration(duration)
+        bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(duration)
+        return CompositeVideoClip([bg, base.set_position("center")], size=VIDEO_RES).set_duration(duration)
 
     # --- Lógica para Imágenes ---
     img_clip = ImageClip(asset_path).set_duration(duration)
@@ -141,7 +141,7 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_t
     
     # CLAVE: Forzamos el CompositeVideoClip a VIDEO_RES y le ponemos un fondo negro sólido
     # Esto elimina cualquier transparencia que Instagram pueda detectar como "error de aspecto"
-    return (CompositeVideoClip([ColorClip(VIDEO_RES, color=(0,0,0)), img_clip], size=VIDEO_RES)
+    return (CompositeVideoClip([ColorClip(VIDEO_RES, color=(0,0,0)).set_duration(duration), img_clip], size=VIDEO_RES)
             .set_duration(duration)
             .fl_image(_enhance_frame))
 
