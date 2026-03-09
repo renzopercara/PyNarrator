@@ -26,7 +26,7 @@ from src.context import (
     detect_context as _detect_context,
     output_path_for_context as _output_path_for_context,
 )
-from src.video_engine import _transcode_to_proxy, download_video
+from src.video_engine import _transcode_to_proxy, download_video, normalize_youtube_clip
 
 from moviepy.editor import (
     VideoFileClip, ImageClip, AudioFileClip, ColorClip,
@@ -59,6 +59,16 @@ _TARGET_RESOLUTION: tuple[int, int] = VIDEO_RES
 # Smartbuild brand colour used as a fallback background when visual assets
 # are unavailable (deep-navy blue).
 _BRAND_COLOR: tuple[int, int, int] = (15, 20, 50)
+
+# Source assets longer than this threshold (in seconds) trigger the trim-first
+# transcoding path: FFmpeg trims to the scene window before MoviePy loads the
+# file.  This prevents encoding an entire 1-hour YouTube video for a 5-second
+# micro-learning clip.
+_LONG_ASSET_THRESHOLD_SECONDS: float = 60.0
+
+# If the total computed duration of all scene clips exceeds this limit before
+# the final export, a warning is logged listing the scenes causing the bloat.
+_MAX_EXPORT_DURATION_SECONDS: float = 300.0
 
 # --- CONSTANTES DE ESTILO OPTIMIZADAS ---
 _ZOOM_RATE_NORMAL = 0.02
@@ -248,18 +258,23 @@ def _make_clip_for_scene(asset_path, duration, zoom_in=True, start_time=0, end_t
     )
 
 
-def _make_video_clip(asset_path: str, duration: float, start_time: float, end_time):
+def _make_video_clip(asset_path: str, duration: float, start_time: float, end_time,
+                     tmp_dir: str = "assets/tmp"):
     """Load, normalise, and composite an MP4 asset into a scene clip.
 
     Processing pipeline:
 
-    1. **Proxy transcoding** – Re-encodes the source to ``libx264/baseline/
-       yuv420p`` via FFmpeg before MoviePy loads it.  This fixes blank/black
-       frames caused by AV1 or other inter-frame codecs with sparse I-frames.
+    1. **Trim-first FFmpeg transcoding** – Computes the effective clip window
+       ``[start_time, trim_end]`` *before* any transcoding.  Calls
+       :func:`~src.video_engine.normalize_youtube_clip` to trim **and**
+       re-encode to ``libx264/yuv420p`` in a single FFmpeg pass.  This avoids
+       transcoding an entire 1-hour YouTube source when only 5–10 s are needed.
        If FFmpeg is unavailable the original file is loaded directly.
     2. **Strict media validation** – Verifies that the loaded clip has
        non-zero dimensions and a positive duration before continuing.
-    3. **Trim** – Subclips to the requested [*start_time*, *end_time*] window.
+    3. **Trim** – When the FFmpeg trim succeeded the clip is already cut;
+       ``set_duration`` pins the expected length.  Otherwise ``subclip`` is
+       used as a fallback.
     4. **FPS normalisation** – Forces 24 fps for consistent compositing.
     5. **Crop-fill** – Resizes and centre-crops to exactly ``VIDEO_RES``.
     6. **Frame enhancement** – Applies :func:`_enhance_frame` via
@@ -276,9 +291,14 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
 
     Args:
         asset_path: Path to the MP4 file.
-        duration:   Fallback duration used for the ColorClip placeholder.
+        duration:   Planned scene duration in seconds; used to compute the
+                    trim window when *end_time* is ``None`` and as the
+                    ColorClip fallback duration.
         start_time: Trim start in seconds.
-        end_time:   Trim end in seconds, or ``None`` for full clip.
+        end_time:   Trim end in seconds, or ``None`` to derive from
+                    ``start_time + duration``.
+        tmp_dir:    Directory for the intermediate trimmed file (default:
+                    ``assets/tmp``).  Created automatically if absent.
 
     Returns:
         A :class:`~moviepy.editor.CompositeVideoClip` (or fallback
@@ -286,15 +306,35 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
     """
     raw_clip = None
     try:
-        # Step 1: Proxy transcoding – forces libx264/yuv420p so MoviePy can
-        # decode every frame independently (fixes AV1 / H.264 blank frames).
+        # Step 1: Trim-first FFmpeg transcoding.
+        # Compute the effective trim window BEFORE any heavy processing so
+        # that FFmpeg only encodes the seconds actually needed by this scene.
+        # For a 1-hour YouTube source, this reduces transcoding time from
+        # ~minutes to ~seconds.
+        trim_end = end_time if end_time is not None else (start_time + duration)
+
         load_path = asset_path
+        already_trimmed = False
         try:
-            load_path = _transcode_to_proxy(asset_path)
-            logger.debug("Proxy transcoded: %s → %s", asset_path, load_path)
+            os.makedirs(tmp_dir, exist_ok=True)
+            # Use millisecond precision in the filename to avoid cache collisions
+            # between scenes with the same integer seconds but different fractional
+            # parts (e.g. start=1.2 vs start=1.8 both become "1").
+            trimmed_path = os.path.join(
+                tmp_dir,
+                f"scene_trim_{start_time * 1000:.0f}_{trim_end * 1000:.0f}.mp4",
+            )
+            load_path = normalize_youtube_clip(
+                asset_path, trimmed_path, str(start_time), str(trim_end)
+            )
+            already_trimmed = True
+            logger.debug(
+                "Trim+transcode: %s [%s→%s] → %s",
+                asset_path, start_time, trim_end, load_path,
+            )
         except Exception as transcode_exc:
             logger.warning(
-                "⚠️ Proxy transcoding skipped (%s); loading original file.", transcode_exc
+                "⚠️ Trim+transcode skipped (%s); loading original file.", transcode_exc
             )
 
         # Step 2: Load and strict media validation
@@ -319,15 +359,15 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
             raw_clip.size, raw_clip.duration, raw_clip.fps,
         )
 
-        # Step 3: Trim to requested window.
-        # Long-Asset Safety Guard: when end_time is not specified, cap the
-        # subclip to the planned scene duration to prevent the encoder from
-        # hanging on hour-long source assets (e.g. a 3670 s YouTube video).
-        clip_start = start_time
-        if end_time is not None:
-            clip_end = min(end_time, raw_clip.duration)
+        # Step 3: Pin the clip to its expected window.
+        if already_trimmed:
+            # FFmpeg already cut [start_time, trim_end]; the file starts at 0.
+            actual_duration = min(trim_end - start_time, raw_clip.duration)
+            clip = raw_clip.set_duration(actual_duration)
         else:
-            clip_end = min(start_time + duration, raw_clip.duration)
+            # FFmpeg trim was skipped; fall back to MoviePy subclip.
+            clip_start = start_time
+            clip_end = min(trim_end, raw_clip.duration)
             available = clip_end - clip_start
             if available < duration:
                 logger.warning(
@@ -335,10 +375,11 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
                     " starting at %.2fs in %s – scene will be shorter than planned.",
                     duration, available, start_time, asset_path,
                 )
-        clip = raw_clip.subclip(clip_start, clip_end)
-        actual_duration = clip.duration
+            clip = raw_clip.subclip(clip_start, clip_end)
+            actual_duration = clip.duration
+
         logger.debug(
-            "After subclip: size=%s duration=%.2fs fps=%s",
+            "After trim step: size=%s duration=%.2fs fps=%s",
             clip.size, clip.duration, clip.fps,
         )
 
@@ -602,10 +643,21 @@ async def main_micro_learning(script: dict) -> None:
                 # Load the video source using start_time/end_time when present
                 scene_start = scene.get("start_time") or 0
                 scene_end = scene.get("end_time") if isinstance(scene.get("end_time"), (int, float)) else None
-                # Fallback duration is used only for non-MP4 assets (e.g. ColorClip)
-                fallback_duration = (
-                    (scene_end - scene_start) if scene_end is not None else src_duration
-                )
+                # Fallback duration is used only for non-MP4 assets (e.g. ColorClip).
+                # Strict Duration Capping: when no explicit end_time is set and the
+                # source is a long-form asset (> threshold), cap the fallback to the
+                # threshold to prevent the pipeline encoding minutes of unused video.
+                if scene_end is not None:
+                    fallback_duration = scene_end - scene_start
+                elif src_duration > _LONG_ASSET_THRESHOLD_SECONDS:
+                    fallback_duration = _LONG_ASSET_THRESHOLD_SECONDS
+                    logger.warning(
+                        "🔒 Scene %d: long-form source detected (%.0fs > %.0fs threshold)."
+                        " Capping fallback duration to %.0fs.",
+                        i, src_duration, _LONG_ASSET_THRESHOLD_SECONDS, fallback_duration,
+                    )
+                else:
+                    fallback_duration = src_duration
                 logger.info(
                     "[Processing Scene %d] Type: %s | Path: %s | Duration: %.1fs"
                     " | Window: %ss–%ss | Resolution: %s",
@@ -692,14 +744,35 @@ async def main_micro_learning(script: dict) -> None:
                 final_video = final_video.set_audio(bg_music)
 
         logger.info("💾 Exporting micro-learning to: %s", output_path)
+
+        # Pre-export duration safety check: warn if total video exceeds the
+        # _MAX_EXPORT_DURATION_SECONDS limit so runaway scenes are identified
+        # before spending minutes on a render that was never intended.
+        total_duration = sum(c.duration for c in scene_clips)
+        if total_duration > _MAX_EXPORT_DURATION_SECONDS:
+            bloat = [
+                f"scene[{j}] type={scenes[j].get('type', '?')} {scene_clips[j].duration:.1f}s"
+                for j in range(min(len(scene_clips), len(scenes)))
+                if scene_clips[j].duration > _LONG_ASSET_THRESHOLD_SECONDS
+            ]
+            logger.warning(
+                "⚠️ Pre-export duration check: total %.1fs exceeds %.0fs limit."
+                " Scenes exceeding %.0fs: %s",
+                total_duration,
+                _MAX_EXPORT_DURATION_SECONDS,
+                _LONG_ASSET_THRESHOLD_SECONDS,
+                ", ".join(bloat) if bloat else "none identified",
+            )
+
         final_video.write_videofile(
             output_path,
             fps=24,
             codec="libx264",
             audio_codec="aac",
+            bitrate="5000k",
             temp_audiofile=os.path.join(OUTPUT_DIR, "temp-audio.m4a"),
             remove_temp=True,
-            threads=4,
+            threads=os.cpu_count() or 4,
             logger=None,
             verbose=False,
             ffmpeg_params=[
@@ -708,6 +781,7 @@ async def main_micro_learning(script: dict) -> None:
                 "-movflags", "+faststart",
                 "-profile:v", "high",
                 "-level", "4.0",
+                "-preset", "veryfast",
             ],
         )
         logger.info("✅ Micro-learning complete!")
@@ -859,14 +933,23 @@ async def main(target_platform: str = "Instagram") -> None:
 
         # 4. Render Final
         logger.info("💾 Exportando a: %s", output_path)
+
+        # Pre-export duration safety check
+        if final_video.duration > _MAX_EXPORT_DURATION_SECONDS:
+            logger.warning(
+                "⚠️ Pre-export duration check: total %.1fs exceeds %.0fs limit.",
+                final_video.duration, _MAX_EXPORT_DURATION_SECONDS,
+            )
+
         final_video.write_videofile(
             output_path,
             fps=24,
             codec="libx264",
             audio_codec="aac",
+            bitrate="5000k",
             temp_audiofile=os.path.join(OUTPUT_DIR, "temp-audio.m4a"),
             remove_temp=True,
-            threads=4,
+            threads=os.cpu_count() or 4,
             logger=None,
             verbose=False,
             ffmpeg_params=[
@@ -874,7 +957,8 @@ async def main(target_platform: str = "Instagram") -> None:
                 "-vf", "setsar=1:1",        # Asegura que cada píxel sea un cuadrado perfecto
                 "-movflags", "+faststart",  # Mueve la metadata al principio del archivo (CLAVE para redes sociales)
                 "-profile:v", "high",       # Perfil de compresión que prefiere Instagram
-                "-level", "4.0"             # Nivel de compatibilidad estándar
+                "-level", "4.0",            # Nivel de compatibilidad estándar
+                "-preset", "veryfast",      # Fast encode preset for efficient rendering
             ]
         )
         logger.info("✅ ¡Proceso completado!")
