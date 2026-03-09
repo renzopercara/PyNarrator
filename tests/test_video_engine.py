@@ -500,8 +500,8 @@ def test_normalize_youtube_clip_raises_on_nonzero_exit(tmp_path):
             normalize_youtube_clip(input_path, output_path, "13", "26")
 
 
-def test_normalize_youtube_clip_ffmpeg_cmd_includes_ss_and_to(tmp_path):
-    """normalize_youtube_clip must pass -ss and -to to ffmpeg."""
+def test_normalize_youtube_clip_ffmpeg_cmd_includes_ss_before_input(tmp_path):
+    """normalize_youtube_clip must place -ss BEFORE -i for fast input seeking."""
     input_path = str(tmp_path / "raw.mp4")
     (tmp_path / "raw.mp4").write_bytes(b"")
     output_path = str(tmp_path / "normalized.mp4")
@@ -518,8 +518,14 @@ def test_normalize_youtube_clip_ffmpeg_cmd_includes_ss_and_to(tmp_path):
         normalize_youtube_clip(input_path, output_path, "13", "26")
 
     cmd = captured["cmd"]
-    assert "-ss" in cmd and cmd[cmd.index("-ss") + 1] == "13"
-    assert "-to" in cmd and cmd[cmd.index("-to") + 1] == "26"
+    assert "-ss" in cmd, "-ss must be present in the ffmpeg command"
+    assert cmd[cmd.index("-ss") + 1] == "13", "-ss value must be the start time"
+    # Fast-seek: -ss must come before -i in the command list
+    assert cmd.index("-ss") < cmd.index("-i"), "-ss must appear before -i for fast input seeking"
+    # Duration flag (-t) must be used instead of absolute-end flag (-to)
+    assert "-t" in cmd, "-t (duration) must be used with input-seeking"
+    assert "-to" not in cmd, "-to must not be used when -ss precedes -i"
+    assert cmd[cmd.index("-t") + 1] == "13.0", "-t value must equal end - start (26-13=13.0)"
 
 
 def test_normalize_youtube_clip_ffmpeg_cmd_uses_libx264_yuv420p_aac(tmp_path):
@@ -624,11 +630,14 @@ def test_build_source_clip_uses_normalize_youtube_clip_when_end_time_given(tmp_p
                 transcode_proxy=True, tmp_dir=str(tmp_path),
             )
 
-    # Must have called ffmpeg with -ss and -to (normalize_youtube_clip behaviour)
+    # Must have called ffmpeg with -ss before -i (fast input seeking)
     cmd = captured.get("cmd", [])
     assert "ffmpeg" in cmd
     assert "-ss" in cmd
-    assert "-to" in cmd
+    assert cmd.index("-ss") < cmd.index("-i"), "-ss must precede -i for fast seeking"
+    # New: uses -t (duration) not -to (absolute end)
+    assert "-t" in cmd
+    assert "-to" not in cmd
     # Must NOT include -profile:v baseline (that is _transcode_to_proxy behaviour)
     assert "-profile:v" not in cmd
 

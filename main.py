@@ -402,6 +402,13 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
         # Step 6: Frame enhancement
         base = clip.fl_image(_enhance_frame)
 
+        # Validation checkpoint: log slice bounds before compositing so that
+        # unexpectedly long clips are caught early.
+        logger.info(
+            "✅ Scene verified: Target duration %.2fs (Slice: %s–%s)",
+            actual_duration, start_time, trim_end,
+        )
+
         # Step 7: Explicit-background compositing with pixel coordinates
         # After crop-fill the clip is exactly VIDEO_RES, so (0, 0) fills the canvas.
         bg = ColorClip(VIDEO_RES, color=(0, 0, 0)).set_duration(actual_duration)
@@ -640,21 +647,29 @@ async def main_micro_learning(script: dict) -> None:
             scene_type = scene.get("type", "")
 
             if scene_type in ("original", "highlighted", "review"):
-                # Load the video source using start_time/end_time when present
+                # Load the video source using start_time/end_time when present.
+                # "ends" (string) is normalised to None so the branch below
+                # can force a concrete end_time for long-form sources.
                 scene_start = scene.get("start_time") or 0
-                scene_end = scene.get("end_time") if isinstance(scene.get("end_time"), (int, float)) else None
+                raw_end = scene.get("end_time")
+                scene_end = raw_end if isinstance(raw_end, (int, float)) else None
+
                 # Fallback duration is used only for non-MP4 assets (e.g. ColorClip).
-                # Strict Duration Capping: when no explicit end_time is set and the
-                # source is a long-form asset (> threshold), cap the fallback to the
-                # threshold to prevent the pipeline encoding minutes of unused video.
+                # Strict Duration Capping / "0s-ends" fix:
+                # When end_time is absent or the string "ends" AND the source is a
+                # long-form asset (> threshold), force an explicit end_time equal to
+                # start_time + threshold so that the FFmpeg trim pass – and
+                # subsequently MoviePy – never inherit the full source duration.
                 if scene_end is not None:
                     fallback_duration = scene_end - scene_start
                 elif src_duration > _LONG_ASSET_THRESHOLD_SECONDS:
                     fallback_duration = _LONG_ASSET_THRESHOLD_SECONDS
+                    scene_end = scene_start + fallback_duration
                     logger.warning(
                         "🔒 Scene %d: long-form source detected (%.0fs > %.0fs threshold)."
-                        " Capping fallback duration to %.0fs.",
-                        i, src_duration, _LONG_ASSET_THRESHOLD_SECONDS, fallback_duration,
+                        " Forcing end_time=%.1fs (start=%.1fs + cap=%.0fs).",
+                        i, src_duration, _LONG_ASSET_THRESHOLD_SECONDS,
+                        scene_end, scene_start, fallback_duration,
                     )
                 else:
                     fallback_duration = src_duration
