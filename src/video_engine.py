@@ -135,6 +135,13 @@ def normalize_youtube_clip(
     re-encode it with ``libx264/yuv420p/aac`` in one pass.  This is the
     recommended pre-processing step before handing the file to MoviePy because:
 
+    * ``-ss`` is placed **before** ``-i`` (fast input seeking), so FFmpeg jumps
+      directly to the nearest keyframe before *start* without decoding every
+      preceding frame.  For a 1-hour source this reduces seek time from minutes
+      to milliseconds.
+    * ``-t`` (clip duration) is used instead of ``-to`` (absolute end time)
+      because with input-seeking the output clock starts at 0, making ``-to``
+      relative to the *output* rather than the *source*.
     * FFmpeg aligns the output to a key-frame boundary, preventing the
       blank/black-frame artefacts that occur when MoviePy subclips an AV1
       (or other inter-frame codec) source.
@@ -151,10 +158,10 @@ def normalize_youtube_clip(
                      ``"assets/tmp/youtube_raw.mp4"``).
         output_path: Destination path for the normalised clip (e.g.
                      ``"assets/tmp/youtube_normalized.mp4"``).
-        start:       Start time as an integer/float in seconds **or** an
-                     ``HH:MM:SS`` string (e.g. ``"13"`` or ``"00:00:13"``).
-        end:         End time in the same format as *start* (e.g. ``"26"``
-                     or ``"00:00:26"``).
+        start:       Start time as a numeric string in seconds (e.g. ``"13"``
+                     or ``"13.5"``).
+        end:         End time as a numeric string in seconds (e.g. ``"26"``).
+                     The clip duration is derived as ``float(end) - float(start)``.
 
     Returns:
         *output_path* – the path to the normalised MP4 file – for convenience
@@ -167,11 +174,27 @@ def normalize_youtube_clip(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-ss", str(start),
-        "-to", str(end),
+    # Place -ss BEFORE -i for fast input seeking: FFmpeg jumps to the nearest
+    # keyframe before *start* without decoding the preceding video.  This is
+    # orders of magnitude faster than output-seeking (placing -ss after -i),
+    # which forces FFmpeg to decode every frame from the beginning up to *start*.
+    # Use -t (duration) instead of -to (absolute end time) because with input
+    # seeking the output clock starts at 0, so -to would be interpreted relative
+    # to the output and could silently produce an empty or wrong-length file.
+    try:
+        clip_duration = float(end) - float(start)
+    except (TypeError, ValueError):
+        clip_duration = None
+        logger.warning(
+            "⚠️ normalize_youtube_clip: could not compute clip duration from"
+            " start=%r end=%r – omitting -t flag; output length is unbounded.",
+            start, end,
+        )
+
+    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", input_path]
+    if clip_duration is not None:
+        cmd += ["-t", str(clip_duration)]
+    cmd += [
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
