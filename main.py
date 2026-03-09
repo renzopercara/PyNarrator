@@ -328,6 +328,13 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
             clip_end = min(end_time, raw_clip.duration)
         else:
             clip_end = min(start_time + duration, raw_clip.duration)
+            available = clip_end - clip_start
+            if available < duration:
+                logger.warning(
+                    "⚠️ Source asset too short: requested %.2fs but only %.2fs available"
+                    " starting at %.2fs in %s – scene will be shorter than planned.",
+                    duration, available, start_time, asset_path,
+                )
         clip = raw_clip.subclip(clip_start, clip_end)
         actual_duration = clip.duration
         logger.debug(
