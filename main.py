@@ -10,10 +10,6 @@ import PIL.ImageDraw
 import PIL.ImageFont
 import PIL.ImageEnhance
 
-# Parche para compatibilidad de Pillow con MoviePy
-if not hasattr(PIL.Image, 'ANTIALIAS'):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
-
 from src.narrator import ArgentineNarrator
 from src.image_manager import get_visual_assets
 from src.subtitle_generator import generate_subtitles
@@ -76,34 +72,44 @@ def _enhance_frame(frame):
     Guarantees that the returned array is ``uint8`` with the **exact same
     shape** as *frame* and contains no ``NaN`` values, so MoviePy's
     ``fl_image`` pipeline never produces corrupted (black/white) frames.
+
+    If any enhancement step raises an exception the original (safe-cast)
+    frame is returned unchanged so the pipeline never stalls.
     """
     logger.debug(
         "_enhance_frame input: shape=%s dtype=%s", frame.shape, frame.dtype
     )
-    safe_frame = frame.astype(np.uint8)
-    img = PIL.Image.fromarray(safe_frame)
-    img = PIL.ImageEnhance.Contrast(img).enhance(_CONTRAST_BOOST)
-    img = PIL.ImageEnhance.Color(img).enhance(_SATURATION_BOOST)
-    img = PIL.ImageEnhance.Brightness(img).enhance(1.1)
+    # Ensure uint8 input before any PIL/NumPy operations.
+    safe_frame = frame if frame.dtype == np.uint8 else frame.astype(np.uint8)
+    try:
+        img = PIL.Image.fromarray(safe_frame)
+        img = PIL.ImageEnhance.Contrast(img).enhance(_CONTRAST_BOOST)
+        img = PIL.ImageEnhance.Color(img).enhance(_SATURATION_BOOST)
+        img = PIL.ImageEnhance.Brightness(img).enhance(1.1)
 
-    arr = np.array(img).astype(np.float32) / 255.0
-    arr = np.power(arr, _GAMMA_CORRECTION)
-    # Guard against NaN / Inf that can arise from degenerate pixel values
-    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-    result = np.clip(arr * 255, 0, 255).astype(np.uint8)
+        arr = np.array(img).astype(np.float32) / 255.0
+        arr = np.power(arr, _GAMMA_CORRECTION)
+        # Guard against NaN / Inf that can arise from degenerate pixel values
+        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+        result = np.clip(arr * 255, 0, 255).astype(np.uint8)
 
-    # Shape must be identical to the input; fall back to the safe cast if not
-    if result.shape != safe_frame.shape:
+        # Shape must be identical to the input; fall back to the safe cast if not
+        if result.shape != safe_frame.shape:
+            logger.warning(
+                "_enhance_frame shape mismatch: input=%s output=%s – returning original",
+                safe_frame.shape, result.shape,
+            )
+            return safe_frame
+
+        logger.debug(
+            "_enhance_frame output: shape=%s dtype=%s", result.shape, result.dtype
+        )
+        return result
+    except Exception as exc:
         logger.warning(
-            "_enhance_frame shape mismatch: input=%s output=%s – returning original",
-            safe_frame.shape, result.shape,
+            "_enhance_frame failed (%s) – returning original frame.", exc
         )
         return safe_frame
-
-    logger.debug(
-        "_enhance_frame output: shape=%s dtype=%s", result.shape, result.dtype
-    )
-    return result
 
 def _load_hook_font(size: int):
     candidates = ["C:/Windows/Fonts/montserrat-extrabold.ttf", "C:/Windows/Fonts/arialbd.ttf"]
@@ -292,7 +298,12 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
             )
 
         # Step 2: Load and strict media validation
-        raw_clip = VideoFileClip(load_path).without_mask().set_opacity(1)
+        raw_clip = VideoFileClip(load_path)
+        # Strip residual alpha channel without relying on .without_mask() which
+        # does not exist in all MoviePy versions.
+        if raw_clip.mask is not None:
+            raw_clip = raw_clip.set_mask(None)
+        raw_clip = raw_clip.set_opacity(1.0)
 
         if raw_clip.w == 0 or raw_clip.h == 0 or raw_clip.duration <= 0:
             logger.warning(
@@ -308,11 +319,28 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
             raw_clip.size, raw_clip.duration, raw_clip.fps,
         )
 
-        # Step 3: Trim to requested window
+        # Step 3: Trim to requested window.
+        # Long-Asset Safety Guard: when end_time is not specified, cap the
+        # subclip to the planned scene duration to prevent the encoder from
+        # hanging on hour-long source assets (e.g. a 3670 s YouTube video).
         clip_start = start_time
-        clip_end = min(end_time, raw_clip.duration) if end_time is not None else raw_clip.duration
+        if end_time is not None:
+            clip_end = min(end_time, raw_clip.duration)
+        else:
+            clip_end = min(start_time + duration, raw_clip.duration)
+            available = clip_end - clip_start
+            if available < duration:
+                logger.warning(
+                    "⚠️ Source asset too short: requested %.2fs but only %.2fs available"
+                    " starting at %.2fs in %s – scene will be shorter than planned.",
+                    duration, available, start_time, asset_path,
+                )
         clip = raw_clip.subclip(clip_start, clip_end)
         actual_duration = clip.duration
+        logger.debug(
+            "After subclip: size=%s duration=%.2fs fps=%s",
+            clip.size, clip.duration, clip.fps,
+        )
 
         # Step 4: FPS normalisation
         clip = clip.set_fps(24)
@@ -325,6 +353,10 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
         else:
             clip = clip.resize(width=VIDEO_W)
         clip = clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=VIDEO_W, height=VIDEO_H)
+        logger.debug(
+            "After crop-fill: size=%s duration=%.2fs fps=%s",
+            clip.size, clip.duration, clip.fps,
+        )
 
         # Step 6: Frame enhancement
         base = clip.fl_image(_enhance_frame)

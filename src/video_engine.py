@@ -381,8 +381,9 @@ def build_source_clip(
        :class:`~moviepy.editor.VideoFileClip` so that the decoder scales
        the frame during demux.  This avoids mismatched frame sizes when
        compositing clips from different sources.
-    3. **Alpha-channel removal** – :meth:`~moviepy.editor.VideoClip.without_mask`
-       and ``.set_opacity(1)`` strip any residual alpha channel.
+    3. **Alpha-channel removal** – If ``clip.mask`` is not ``None``,
+       ``set_mask(None)`` strips the alpha channel.  ``set_opacity(1.0)``
+       then forces full opacity to prevent alpha-channel rendering errors.
     4. **FPS normalisation** – ``.set_fps(fps)`` sets a consistent frame rate
        across all clips before compositing (default: 24 fps).
     5. **Explicit duration** – When the clip was pre-trimmed by
@@ -458,10 +459,22 @@ def build_source_clip(
     clip = VideoFileClip(load_path, target_resolution=target_resolution)
 
     # Strip residual alpha channel to prevent white-frame rendering artefacts.
-    clip = clip.without_mask().set_opacity(1)
+    # .without_mask() does not exist in all MoviePy versions; use set_mask(None)
+    # directly so the call is safe regardless of API version.
+    if clip.mask is not None:
+        clip = clip.set_mask(None)
+    clip = clip.set_opacity(1.0)
+    logger.debug(
+        "Clip loaded: size=%s duration=%.2fs fps=%s",
+        clip.size, clip.duration, clip.fps,
+    )
 
     # Normalise FPS across all clips to avoid sync issues during compositing.
     clip = clip.set_fps(fps)
+    logger.debug(
+        "After set_fps: size=%s duration=%.2fs fps=%s",
+        clip.size, clip.duration, clip.fps,
+    )
 
     if already_trimmed:
         # Clip is pre-trimmed by FFmpeg; set explicit duration for reliability.
@@ -471,18 +484,24 @@ def build_source_clip(
         # Trim to requested window via MoviePy.
         clip_end = min(end_time, clip.duration) if end_time is not None else clip.duration
         clip = clip.subclip(start_time, clip_end)
+    logger.debug(
+        "After subclip: size=%s duration=%.2fs fps=%s",
+        clip.size, clip.duration, clip.fps,
+    )
 
     # Explicit background compositing: place the clip over a solid black
     # ColorClip.  This forces the render engine to treat the video as a
     # concrete image layer and eliminates white transparency artefacts.
+    # use_bgclip=True designates the black ColorClip as the master reference
+    # so the composite inherits its size and duration.
     bg = ColorClip(
         size=(clip.w, clip.h),
         color=(0, 0, 0),
     ).set_duration(clip.duration)
-    composite = CompositeVideoClip([bg, clip.set_position("center")])
+    composite = CompositeVideoClip([bg, clip.set_position("center")], use_bgclip=True)
 
-    # Explicitly assign audio from the loaded clip to guarantee sync.
-    composite.audio = clip.audio
+    # Explicitly assign audio via set_audio() to guarantee correct muxing.
+    composite = composite.set_audio(clip.audio)
 
     logger.info("✅ Clip ready: %.2fs", composite.duration)
     return composite

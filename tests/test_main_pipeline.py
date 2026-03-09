@@ -365,11 +365,10 @@ def test_make_video_clip_returns_colorclip_for_zero_dimension_clip(tmp_path):
     fake_mp4 = tmp_path / "fake.mp4"
     fake_mp4.write_bytes(b"not-a-real-video")
 
-    # Simulate a clip with zero width (invalid).  Wire the mock chain so that
-    # .without_mask().set_opacity() returns the same object, giving us a
-    # single mock whose attributes we can control and inspect.
+    # Simulate a clip with zero width (invalid).  Set mask=None so the new
+    # mask-stripping logic does not call set_mask(), keeping the mock simple.
     mock_clip = mock.MagicMock()
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.w = 0
     mock_clip.h = 0
@@ -457,3 +456,103 @@ def test_resolve_video_source_returns_url_on_download_failure(tmp_path, monkeypa
     # On failure the original URL is returned so the caller's fallback path
     # (ColorClip) is triggered with an appropriate warning already logged.
     assert result == url
+
+
+# ---------------------------------------------------------------------------
+# _enhance_frame – try-except fallback on PIL failure
+# ---------------------------------------------------------------------------
+
+
+def test_enhance_frame_returns_original_frame_on_pil_error(monkeypatch):
+    """_enhance_frame must return the safe-cast original frame if PIL raises."""
+    import PIL.ImageEnhance as _IE
+
+    frame = np.full((50, 50, 3), 100, dtype=np.uint8)
+
+    # Force PIL contrast enhance to raise
+    monkeypatch.setattr(
+        _IE.Contrast, "enhance", mock.Mock(side_effect=RuntimeError("PIL exploded"))
+    )
+
+    result = _enhance_frame(frame)
+
+    assert result.dtype == np.uint8
+    assert result.shape == frame.shape
+    # The result must be identical to the safe-cast input
+    np.testing.assert_array_equal(result, frame)
+
+
+def test_enhance_frame_converts_float_input_to_uint8():
+    """_enhance_frame must cast float32 input to uint8 before processing."""
+    frame = np.full((20, 20, 3), 0.5, dtype=np.float32)
+    result = _enhance_frame(frame)
+    assert result.dtype == np.uint8
+
+
+# ---------------------------------------------------------------------------
+# _make_video_clip – Long-Asset Safety Guard
+# ---------------------------------------------------------------------------
+
+
+def test_make_video_clip_long_asset_caps_subclip_to_scene_duration(tmp_path):
+    """_make_video_clip must cap the subclip to the planned scene duration when
+    end_time is None, preventing hangs on hour-long source assets."""
+    fake_mp4 = tmp_path / "long_video.mp4"
+    fake_mp4.write_bytes(b"not-a-real-video")
+
+    scene_duration = 8.0
+    long_source_duration = 3670.0  # ~1 hour
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = long_source_duration
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(main_module, "_transcode_to_proxy", return_value=str(fake_mp4)):
+            with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                _make_video_clip(str(fake_mp4), duration=scene_duration, start_time=0, end_time=None)
+
+    # subclip must be called with clip_end <= scene_duration, not 3670
+    mock_clip.subclip.assert_called_once()
+    _, subclip_end = mock_clip.subclip.call_args[0]
+    assert subclip_end <= scene_duration, (
+        f"subclip end ({subclip_end:.1f}s) must not exceed scene duration ({scene_duration}s)"
+    )
+
+
+def test_make_video_clip_strips_mask_when_present(tmp_path):
+    """_make_video_clip must call set_mask(None) when clip.mask is not None."""
+    from moviepy.editor import ColorClip
+
+    fake_mp4 = tmp_path / "video.mp4"
+    fake_mp4.write_bytes(b"not-a-real-video")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = mock.MagicMock()  # non-None mask
+    mock_clip.set_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 0  # trigger fallback immediately after mask-stripping
+    mock_clip.h = 0
+    mock_clip.duration = 5.0
+    mock_clip.size = (0, 0)
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        _make_video_clip(str(fake_mp4), duration=3.0, start_time=0, end_time=None)
+
+    mock_clip.set_mask.assert_called_once_with(None)
+
