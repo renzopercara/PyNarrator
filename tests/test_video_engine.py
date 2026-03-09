@@ -193,8 +193,9 @@ def test_build_source_clip_raises_when_end_lte_start(tmp_path):
         build_source_clip(str(dummy), start_time=10, end_time=5)
 
 
-def test_build_source_clip_calls_without_mask_and_set_opacity(tmp_path):
-    """build_source_clip must call .without_mask().set_opacity(1) on the clip."""
+def test_build_source_clip_strips_mask_and_sets_opacity(tmp_path):
+    """build_source_clip must use set_mask(None) when mask is present and
+    call set_opacity(1.0) to prevent alpha-channel rendering errors."""
     dummy = tmp_path / "video.mp4"
     dummy.write_bytes(b"")
 
@@ -202,9 +203,11 @@ def test_build_source_clip_calls_without_mask_and_set_opacity(tmp_path):
     mock_clip.duration = 30.0
     mock_clip.w = 1280
     mock_clip.h = 720
+    # Simulate a clip that has a mask
+    mock_clip.mask = mock.MagicMock()
 
-    # Chain: without_mask() → set_opacity() → set_fps() → subclip() → mock_clip
-    mock_clip.without_mask.return_value = mock_clip
+    # Chain: set_mask(None) → set_opacity() → set_fps() → subclip() → mock_clip
+    mock_clip.set_mask.return_value = mock_clip
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -228,9 +231,40 @@ def test_build_source_clip_calls_without_mask_and_set_opacity(tmp_path):
             # transcode_proxy=False avoids calling ffmpeg in unit tests
             result = build_source_clip(str(dummy), start_time=13, end_time=26, transcode_proxy=False)
 
-    mock_clip.without_mask.assert_called_once()
-    mock_clip.set_opacity.assert_called_once_with(1)
+    mock_clip.set_mask.assert_called_once_with(None)
+    mock_clip.set_opacity.assert_called_once_with(1.0)
 
+
+def test_build_source_clip_no_set_mask_when_mask_is_none(tmp_path):
+    """build_source_clip must NOT call set_mask() when clip.mask is already None."""
+    dummy = tmp_path / "video.mp4"
+    dummy.write_bytes(b"")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.duration = 30.0
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.mask = None  # no mask present
+
+    mock_clip.set_mask.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+
+    mock_vfc_cls = mock.MagicMock(return_value=mock_clip)
+
+    with mock.patch.dict(
+        "sys.modules",
+        {"moviepy.editor": types.ModuleType("moviepy.editor")},
+    ):
+        sys.modules["moviepy.editor"].VideoFileClip = mock_vfc_cls  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].ColorClip = mock.MagicMock()  # type: ignore[attr-defined]
+        sys.modules["moviepy.editor"].CompositeVideoClip = mock.MagicMock()  # type: ignore[attr-defined]
+        build_source_clip(str(dummy), start_time=13, end_time=26, transcode_proxy=False)
+
+    mock_clip.set_mask.assert_not_called()
+    mock_clip.set_opacity.assert_called_once_with(1.0)
 
 def test_build_source_clip_passes_target_resolution(tmp_path):
     """VideoFileClip must be instantiated with target_resolution."""
@@ -241,7 +275,7 @@ def test_build_source_clip_passes_target_resolution(tmp_path):
     mock_clip.duration = 30.0
     mock_clip.w = 720
     mock_clip.h = 1280
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -272,7 +306,7 @@ def test_build_source_clip_calls_set_fps(tmp_path):
     mock_clip.duration = 30.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -301,7 +335,7 @@ def test_build_source_clip_uses_composite_with_black_background(tmp_path):
     mock_clip.duration = 13.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -328,10 +362,12 @@ def test_build_source_clip_uses_composite_with_black_background(tmp_path):
     color_kwargs = mock_color_cls.call_args[1]
     assert color_kwargs.get("color") == (0, 0, 0), "Background must be black (0,0,0)"
 
-    # CompositeVideoClip must be called with [bg, clip] layers
+    # CompositeVideoClip must be called with [bg, clip] layers and use_bgclip=True
     mock_composite_cls.assert_called_once()
     layers = mock_composite_cls.call_args[0][0]
     assert layers[0] is mock_bg, "First layer must be the black background"
+    composite_kwargs = mock_composite_cls.call_args[1]
+    assert composite_kwargs.get("use_bgclip") is True, "use_bgclip must be True"
 
 
 def test_build_source_clip_transcode_proxy_calls_ffmpeg(tmp_path):
@@ -345,7 +381,7 @@ def test_build_source_clip_transcode_proxy_calls_ffmpeg(tmp_path):
     mock_clip.duration = 13.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -560,7 +596,7 @@ def test_build_source_clip_uses_normalize_youtube_clip_when_end_time_given(tmp_p
     mock_clip.duration = 13.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.set_duration.return_value = mock_clip
@@ -606,7 +642,7 @@ def test_build_source_clip_uses_transcode_proxy_when_no_end_time(tmp_path):
     mock_clip.duration = 30.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.subclip.return_value = mock_clip
@@ -650,7 +686,7 @@ def test_build_source_clip_sets_explicit_duration_when_pretrimmed(tmp_path):
     mock_clip.duration = 13.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.set_duration.return_value = mock_clip
@@ -681,7 +717,7 @@ def test_build_source_clip_sets_explicit_duration_when_pretrimmed(tmp_path):
 
 
 def test_build_source_clip_assigns_audio_to_composite(tmp_path):
-    """build_source_clip must assign clip.audio to the composite for guaranteed sync."""
+    """build_source_clip must call set_audio(clip.audio) on the composite."""
     dummy = tmp_path / "video.mp4"
     dummy.write_bytes(b"")
 
@@ -689,7 +725,7 @@ def test_build_source_clip_assigns_audio_to_composite(tmp_path):
     mock_clip.duration = 13.0
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.without_mask.return_value = mock_clip
+    mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
     mock_clip.set_duration.return_value = mock_clip
@@ -720,8 +756,8 @@ def test_build_source_clip_assigns_audio_to_composite(tmp_path):
                 transcode_proxy=True, tmp_dir=str(tmp_path),
             )
 
-    # composite.audio must be set to clip.audio
-    assert mock_composite_inst.audio is mock_audio
+    # set_audio must be called on the composite with clip.audio
+    mock_composite_inst.set_audio.assert_called_once_with(mock_audio)
 
 
 # ---------------------------------------------------------------------------

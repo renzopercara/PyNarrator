@@ -8,10 +8,6 @@ from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import ImageClip
 from src.config import AUDIO_DIR, VIDEO_RES
 
-# Parche de compatibilidad para Pillow 10+
-if not hasattr(Image, "ANTIALIAS"):
-    Image.ANTIALIAS = Image.LANCZOS
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
