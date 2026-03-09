@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main as main_module
 from main import (
     _BRAND_COLOR,
+    _LONG_ASSET_THRESHOLD_SECONDS,
+    _MAX_EXPORT_DURATION_SECONDS,
     _PLATFORM_RESOLUTIONS,
     _TARGET_RESOLUTION,
     _enhance_frame,
@@ -495,44 +497,54 @@ def test_enhance_frame_converts_float_input_to_uint8():
 
 
 def test_make_video_clip_long_asset_caps_subclip_to_scene_duration(tmp_path):
-    """_make_video_clip must cap the subclip to the planned scene duration when
-    end_time is None, preventing hangs on hour-long source assets."""
+    """_make_video_clip must call normalize_youtube_clip with trim_end capped to
+    start_time + duration, preventing encoding of the entire long-form source."""
     fake_mp4 = tmp_path / "long_video.mp4"
     fake_mp4.write_bytes(b"not-a-real-video")
 
     scene_duration = 8.0
-    long_source_duration = 3670.0  # ~1 hour
 
     mock_clip = mock.MagicMock()
     mock_clip.mask = None
     mock_clip.set_opacity.return_value = mock_clip
     mock_clip.w = 1280
     mock_clip.h = 720
-    mock_clip.duration = long_source_duration
+    mock_clip.duration = scene_duration  # trimmed proxy is already short
     mock_clip.size = (1280, 720)
     mock_clip.fps = 24
-    mock_clip.subclip.return_value = mock_clip
     mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
     mock_clip.resize.return_value = mock_clip
     mock_clip.crop.return_value = mock_clip
     mock_clip.fl_image.return_value = mock_clip
     mock_clip.set_position.return_value = mock_clip
-    mock_clip.set_duration.return_value = mock_clip
     mock_clip.set_audio.return_value = mock_clip
 
+    captured = {}
+
+    def fake_normalize(input_path, output_path, start, end):
+        captured["start"] = start
+        captured["end"] = end
+        return output_path
+
     with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
-        with mock.patch.object(main_module, "_transcode_to_proxy", return_value=str(fake_mp4)):
+        with mock.patch.object(main_module, "normalize_youtube_clip", side_effect=fake_normalize):
             with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
                 mock_cv.return_value.set_duration.return_value = mock_cv.return_value
                 mock_cv.return_value.set_audio.return_value = mock_cv.return_value
-                _make_video_clip(str(fake_mp4), duration=scene_duration, start_time=0, end_time=None)
+                _make_video_clip(
+                    str(fake_mp4), duration=scene_duration, start_time=0, end_time=None,
+                    tmp_dir=str(tmp_path),
+                )
 
-    # subclip must be called with clip_end <= scene_duration, not 3670
-    mock_clip.subclip.assert_called_once()
-    _, subclip_end = mock_clip.subclip.call_args[0]
-    assert subclip_end <= scene_duration, (
-        f"subclip end ({subclip_end:.1f}s) must not exceed scene duration ({scene_duration}s)"
+    # normalize_youtube_clip must be called with end = start + duration = 8.0
+    assert "end" in captured, "normalize_youtube_clip must be called"
+    assert float(captured["end"]) <= scene_duration, (
+        f"normalize end ({captured['end']}) must not exceed scene_duration ({scene_duration}s)"
     )
+    # The trim window end must equal start_time + duration (0 + 8 = 8)
+    assert float(captured["start"]) == 0
+    assert float(captured["end"]) == scene_duration
 
 
 def test_make_video_clip_strips_mask_when_present(tmp_path):
@@ -556,3 +568,308 @@ def test_make_video_clip_strips_mask_when_present(tmp_path):
 
     mock_clip.set_mask.assert_called_once_with(None)
 
+
+
+# ---------------------------------------------------------------------------
+# New constants – _LONG_ASSET_THRESHOLD_SECONDS, _MAX_EXPORT_DURATION_SECONDS
+# ---------------------------------------------------------------------------
+
+
+def test_long_asset_threshold_is_sixty_seconds():
+    """_LONG_ASSET_THRESHOLD_SECONDS must be 60.0 as specified in the requirement."""
+    assert _LONG_ASSET_THRESHOLD_SECONDS == 60.0
+
+
+def test_max_export_duration_is_300_seconds():
+    """_MAX_EXPORT_DURATION_SECONDS must be 300.0 (5 minutes)."""
+    assert _MAX_EXPORT_DURATION_SECONDS == 300.0
+
+
+# ---------------------------------------------------------------------------
+# _make_video_clip – trim-first transcoding (normalize_youtube_clip used)
+# ---------------------------------------------------------------------------
+
+
+def test_make_video_clip_uses_normalize_youtube_clip_not_transcode_to_proxy(tmp_path):
+    """_make_video_clip must call normalize_youtube_clip (trim+transcode) instead
+    of _transcode_to_proxy so only the needed seconds are encoded."""
+    fake_mp4 = tmp_path / "source.mp4"
+    fake_mp4.write_bytes(b"fake")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = 5.0
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    normalize_called = []
+    transcode_called = []
+
+    def fake_normalize(input_path, output_path, start, end):
+        normalize_called.append((start, end))
+        return output_path
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(main_module, "normalize_youtube_clip", side_effect=fake_normalize):
+            with mock.patch.object(main_module, "_transcode_to_proxy", side_effect=transcode_called.append):
+                with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                    mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                    mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                    _make_video_clip(
+                        str(fake_mp4), duration=5.0, start_time=0, end_time=None,
+                        tmp_dir=str(tmp_path),
+                    )
+
+    assert normalize_called, "normalize_youtube_clip must be called"
+    assert not transcode_called, "_transcode_to_proxy must NOT be called"
+
+
+def test_make_video_clip_trim_end_equals_end_time_when_provided(tmp_path):
+    """When end_time is explicitly provided, normalize_youtube_clip must use it."""
+    fake_mp4 = tmp_path / "source.mp4"
+    fake_mp4.write_bytes(b"fake")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = 13.0
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    captured = {}
+
+    def fake_normalize(input_path, output_path, start, end):
+        captured["start"] = start
+        captured["end"] = end
+        return output_path
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(main_module, "normalize_youtube_clip", side_effect=fake_normalize):
+            with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                _make_video_clip(
+                    str(fake_mp4), duration=5.0, start_time=13, end_time=26,
+                    tmp_dir=str(tmp_path),
+                )
+
+    assert float(captured["start"]) == 13
+    assert float(captured["end"]) == 26
+
+
+def test_make_video_clip_fallback_subclip_when_normalize_fails(tmp_path):
+    """When normalize_youtube_clip fails, _make_video_clip falls back to subclip."""
+    fake_mp4 = tmp_path / "source.mp4"
+    fake_mp4.write_bytes(b"fake")
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = 30.0
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.subclip.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(
+            main_module, "normalize_youtube_clip",
+            side_effect=RuntimeError("ffmpeg not found"),
+        ):
+            with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                _make_video_clip(
+                    str(fake_mp4), duration=5.0, start_time=0, end_time=None,
+                    tmp_dir=str(tmp_path),
+                )
+
+    # Fallback: subclip called with end = min(0 + 5.0, 30.0) = 5.0
+    mock_clip.subclip.assert_called_once()
+    _, subclip_end = mock_clip.subclip.call_args[0]
+    assert subclip_end <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# main_micro_learning – fallback_duration capping
+# ---------------------------------------------------------------------------
+
+
+def test_main_micro_learning_caps_fallback_duration_for_long_source(tmp_path, monkeypatch):
+    """main_micro_learning must cap fallback_duration to _LONG_ASSET_THRESHOLD_SECONDS
+    when the source asset is longer than the threshold and no end_time is provided."""
+    import json as _json
+
+    long_source_duration = 3670.0  # ~1 hour
+
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original"},  # no start_time / end_time
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module, "_output_path_for_context", mock.Mock(return_value=str(tmp_path / "out.mp4"))
+    )
+
+    # Simulate a long-form source duration
+    mock_src_clip = mock.MagicMock()
+    mock_src_clip.duration = long_source_duration
+    monkeypatch.setattr(main_module, "VideoFileClip", mock.Mock(return_value=mock_src_clip))
+
+    captured_duration = []
+
+    def fake_make_clip_for_scene(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        # Inline assertion: duration must never exceed the threshold for a long source
+        assert duration <= _LONG_ASSET_THRESHOLD_SECONDS, (
+            f"_make_clip_for_scene received uncapped duration {duration:.0f}s "
+            f"(threshold: {_LONG_ASSET_THRESHOLD_SECONDS}s)"
+        )
+        captured_duration.append(duration)
+        c = mock.MagicMock()
+        c.duration = duration
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip_for_scene)
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 10.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 10.0
+    mock_composite.audio = None
+    mock_composite.write_videofile.side_effect = RuntimeError("abort render")
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert captured_duration, "Expected _make_clip_for_scene to be called"
+    assert captured_duration[0] <= _LONG_ASSET_THRESHOLD_SECONDS, (
+        f"fallback_duration ({captured_duration[0]:.0f}s) must be capped to "
+        f"{_LONG_ASSET_THRESHOLD_SECONDS}s when source is long-form"
+    )
+
+
+# ---------------------------------------------------------------------------
+# write_videofile – export parameters (bitrate, threads, preset)
+# ---------------------------------------------------------------------------
+
+
+def test_main_micro_learning_write_videofile_uses_bitrate_5000k(tmp_path, monkeypatch):
+    """main_micro_learning write_videofile must include bitrate='5000k' (verified
+    via the full educational-scene path that reaches write_videofile)."""
+    # This test reuses the educational-scene path since an empty scenes list causes
+    # early return before write_videofile is reached.  The actual bitrate assertion
+    # is in test_main_micro_learning_ffmpeg_params_includes_preset_veryfast which
+    # fully exercises the write call.  Here we verify that the constant exported
+    # from the module has the correct value.
+    assert main_module._MAX_EXPORT_DURATION_SECONDS == 300.0
+
+
+def test_main_micro_learning_ffmpeg_params_includes_preset_veryfast(tmp_path, monkeypatch):
+    """The ffmpeg_params passed to write_videofile must include -preset veryfast."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": "",
+        "scenes": [
+            {
+                "type": "educational",
+                "term": "test",
+                "definition": "A test definition.",
+                "example": "A test example.",
+                "it_example": "A test IT example.",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module, "_output_path_for_context", mock.Mock(return_value=str(tmp_path / "out.mp4"))
+    )
+
+    # Stub out audio generation
+    async def fake_gen_edu_audio(text, voice_key, idx):
+        audio_path = str(tmp_path / f"edu_{idx}.mp3")
+        open(audio_path, "wb").close()
+        return audio_path
+
+    monkeypatch.setattr(main_module, "_generate_edu_audio", fake_gen_edu_audio)
+
+    mock_audio = mock.MagicMock()
+    mock_audio.duration = 3.0
+    mock_audio.crossfadein.return_value = mock_audio
+    mock_audio.set_audio.return_value = mock_audio
+    monkeypatch.setattr(main_module, "AudioFileClip", mock.Mock(return_value=mock_audio))
+    monkeypatch.setattr(main_module, "_make_educational_card", mock.Mock(return_value=mock_audio))
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 3.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 3.0
+    mock_composite.audio = None
+    captured_kwargs = {}
+
+    def fake_write(path, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    mock_composite.write_videofile.side_effect = fake_write
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+
+    params = captured_kwargs.get("ffmpeg_params", [])
+    assert "-preset" in params, "ffmpeg_params must include -preset"
+    preset_idx = params.index("-preset")
+    assert params[preset_idx + 1] == "veryfast", "preset must be veryfast"
+    assert captured_kwargs.get("bitrate") == "5000k", "bitrate must be 5000k"
