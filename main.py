@@ -702,6 +702,7 @@ async def main_micro_learning(script: dict) -> None:
     logger.info("🎬 Micro-Learning script detected → %s", output_path)
 
     scene_clips = []
+    scene_clip_labels: list[str] = []  # scene type label for each entry in scene_clips
     edu_audio_paths = []
 
     try:
@@ -769,6 +770,7 @@ async def main_micro_learning(script: dict) -> None:
                 if scene_clips:
                     clip = clip.crossfadein(0.4)
                 scene_clips.append(clip)
+                scene_clip_labels.append(scene_type)
                 logger.info(
                     "▶ Scene %d (%s): loaded video_source [%ss–%ss] (%.1fs)",
                     i, scene_type, scene_start,
@@ -796,6 +798,7 @@ async def main_micro_learning(script: dict) -> None:
                 if scene_clips:
                     card = card.crossfadein(0.4)
                 scene_clips.append(card)
+                scene_clip_labels.append("educational")
                 logger.info(
                     "📚 Scene %d (educational): '%s' voiced by %s (%.1fs)",
                     i, term, edu_voice, edu_duration,
@@ -812,18 +815,17 @@ async def main_micro_learning(script: dict) -> None:
         # If any clip exceeds the long-asset threshold, emit a Warning and
         # cap it so the final export never inherits a runaway duration.
         capped_clips = []
-        for j, c in enumerate(scene_clips):
+        for j, (c, label) in enumerate(zip(scene_clips, scene_clip_labels)):
             clip_dur = c.duration
-            scene_label = scenes[j].get("type", "?") if j < len(scenes) else "?"
             logger.info(
                 "🎞️ Clip[%d] type=%s duration=%.2fs",
-                j, scene_label, clip_dur,
+                j, label, clip_dur,
             )
             if clip_dur > _LONG_ASSET_THRESHOLD_SECONDS:
                 logger.warning(
                     "⚠️ Clip[%d] (type=%s) duration %.2fs exceeds threshold %.0fs"
                     " – capping to threshold.",
-                    j, scene_label, clip_dur, _LONG_ASSET_THRESHOLD_SECONDS,
+                    j, label, clip_dur, _LONG_ASSET_THRESHOLD_SECONDS,
                 )
                 c = c.set_duration(_LONG_ASSET_THRESHOLD_SECONDS)
             capped_clips.append(c)
