@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import random
+import subprocess
 import textwrap
 import numpy as np
 import PIL.Image
@@ -324,14 +325,23 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
                 tmp_dir,
                 f"scene_trim_{start_time * 1000:.0f}_{trim_end * 1000:.0f}.mp4",
             )
-            load_path = normalize_youtube_clip(
-                asset_path, trimmed_path, str(start_time), str(trim_end)
-            )
-            already_trimmed = True
-            logger.debug(
-                "Trim+transcode: %s [%s→%s] → %s",
-                asset_path, start_time, trim_end, load_path,
-            )
+            if os.path.exists(trimmed_path):
+                # Reuse the existing trimmed file to skip a redundant FFmpeg pass.
+                load_path = trimmed_path
+                already_trimmed = True
+                logger.debug(
+                    "♻️ Reusing cached trim: %s [%s→%s]",
+                    trimmed_path, start_time, trim_end,
+                )
+            else:
+                load_path = normalize_youtube_clip(
+                    asset_path, trimmed_path, str(start_time), str(trim_end)
+                )
+                already_trimmed = True
+                logger.debug(
+                    "Trim+transcode: %s [%s→%s] → %s",
+                    asset_path, start_time, trim_end, load_path,
+                )
         except Exception as transcode_exc:
             logger.warning(
                 "⚠️ Trim+transcode skipped (%s); loading original file.", transcode_exc
@@ -553,6 +563,49 @@ def _is_micro_learning_script(script) -> bool:
     return isinstance(script, dict) and "metadata" in script and "scenes" in script
 
 
+def _get_video_duration_ffprobe(path: str, default: float = 5.0) -> float:
+    """Return the duration (seconds) of *path* using ``ffprobe``.
+
+    Reads only the container metadata so the entire video file is never
+    decoded or buffered into memory – critical for 1-hour YouTube sources
+    where ``VideoFileClip`` would hang or exhaust RAM.
+
+    Falls back to *default* if ``ffprobe`` is not available or the call
+    fails (e.g. network URL, corrupt file).  When the source is a URL the
+    caller should set *default* to a safe cap value (e.g. the long-asset
+    threshold) rather than a short placeholder.
+
+    Args:
+        path:    Local filesystem path to the video file.
+        default: Value returned when ffprobe is unavailable or fails.
+
+    Returns:
+        Duration in seconds (float).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        duration = float(result.stdout.strip())
+        logger.debug("ffprobe duration for '%s': %.2fs", path, duration)
+        return duration
+    except Exception as exc:
+        logger.warning(
+            "⚠️ ffprobe could not determine duration for '%s' (%s) – using default %.1fs.",
+            path, exc, default,
+        )
+        return default
+
+
 async def _generate_edu_audio(text: str, voice_key: str, idx: int) -> str:
     """Generate a TTS audio file for an educational scene narration.
 
@@ -617,14 +670,17 @@ async def main_micro_learning(script: dict) -> None:
     tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tmp")
     video_source = _resolve_video_source(raw_video_source, tmp_dir=tmp_dir)
 
-    # Determine duration of the source video clip
+    # Determine duration of the source video via ffprobe – lightweight metadata
+    # read that never loads frames.  VideoFileClip on a 1-hour YouTube source
+    # would buffer the entire file and cause a hang/OOM.
+    # If the source is still a URL (download failed) or the file is absent,
+    # default to the long-asset threshold so any slice without an explicit
+    # end_time will be capped to a safe length.
     src_duration = 5.0
-    src_video_clip = None
     if video_source and os.path.exists(video_source):
-        src_video_clip = VideoFileClip(video_source)
-        src_duration = src_video_clip.duration
-        src_video_clip.close()
-        src_video_clip = None
+        src_duration = _get_video_duration_ffprobe(
+            video_source, default=_LONG_ASSET_THRESHOLD_SECONDS
+        )
         logger.info(
             "📹 video_source resolved | Path: %s | Duration: %.2fs",
             video_source, src_duration,
@@ -636,10 +692,17 @@ async def main_micro_learning(script: dict) -> None:
             video_source, raw_video_source,
         )
 
+    # Pre-pass: locate first "original" scene so "review" scenes with
+    # duration="auto" can inherit its time window.
+    first_original_scene = next(
+        (s for s in scenes if s.get("type") == "original"), None
+    )
+
     output_path = _output_path_for_context("esl")
     logger.info("🎬 Micro-Learning script detected → %s", output_path)
 
     scene_clips = []
+    scene_clip_labels: list[str] = []  # scene type label for each entry in scene_clips
     edu_audio_paths = []
 
     try:
@@ -653,6 +716,27 @@ async def main_micro_learning(script: dict) -> None:
                 scene_start = scene.get("start_time") or 0
                 raw_end = scene.get("end_time")
                 scene_end = raw_end if isinstance(raw_end, (int, float)) else None
+
+                # Auto-duration: review scene inherits the time window of the
+                # first original scene, effectively "looping" the listening
+                # context without distractions.
+                if (
+                    scene_type == "review"
+                    and scene.get("duration") == "auto"
+                    and first_original_scene is not None
+                ):
+                    scene_start = first_original_scene.get("start_time") or 0
+                    raw_orig_end = first_original_scene.get("end_time")
+                    scene_end = (
+                        raw_orig_end
+                        if isinstance(raw_orig_end, (int, float))
+                        else None
+                    )
+                    logger.info(
+                        "🔁 Scene %d (review auto): inheriting window from first "
+                        "original scene [%ss–%ss].",
+                        i, scene_start, scene_end,
+                    )
 
                 # Fallback duration is used only for non-MP4 assets (e.g. ColorClip).
                 # Strict Duration Capping / "0s-ends" fix:
@@ -686,6 +770,7 @@ async def main_micro_learning(script: dict) -> None:
                 if scene_clips:
                     clip = clip.crossfadein(0.4)
                 scene_clips.append(clip)
+                scene_clip_labels.append(scene_type)
                 logger.info(
                     "▶ Scene %d (%s): loaded video_source [%ss–%ss] (%.1fs)",
                     i, scene_type, scene_start,
@@ -713,6 +798,7 @@ async def main_micro_learning(script: dict) -> None:
                 if scene_clips:
                     card = card.crossfadein(0.4)
                 scene_clips.append(card)
+                scene_clip_labels.append("educational")
                 logger.info(
                     "📚 Scene %d (educational): '%s' voiced by %s (%.1fs)",
                     i, term, edu_voice, edu_duration,
@@ -724,6 +810,28 @@ async def main_micro_learning(script: dict) -> None:
         if not scene_clips:
             logger.error("❌ No scene clips were generated. Aborting.")
             return
+
+        # Log duration of every clip before concatenation.
+        # If any clip exceeds the long-asset threshold, emit a Warning and
+        # cap it so the final export never inherits a runaway duration.
+        capped_clips = []
+        for j, (c, label) in enumerate(zip(scene_clips, scene_clip_labels)):
+            clip_dur = c.duration
+            logger.info(
+                "🎞️ Clip[%d] type=%s duration=%.2fs",
+                j, label, clip_dur,
+            )
+            if clip_dur > _LONG_ASSET_THRESHOLD_SECONDS:
+                logger.warning(
+                    "⚠️ Clip[%d] (type=%s) duration %.2fs exceeds threshold %.0fs"
+                    " – capping to threshold.",
+                    j, label, clip_dur, _LONG_ASSET_THRESHOLD_SECONDS,
+                )
+                c = c.set_duration(_LONG_ASSET_THRESHOLD_SECONDS)
+            capped_clips.append(c)
+        # Replace scene_clips with capped versions so the finally block
+        # closes the correct (possibly updated) clip objects.
+        scene_clips = capped_clips
 
         final_video = concatenate_videoclips(scene_clips, method="compose")
 
