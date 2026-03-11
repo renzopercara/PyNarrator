@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main as main_module
 from main import (
     _BRAND_COLOR,
+    _DEFAULT_SCENE_DURATION,
     _LONG_ASSET_THRESHOLD_SECONDS,
     _MAX_EXPORT_DURATION_SECONDS,
     _PLATFORM_RESOLUTIONS,
@@ -31,6 +32,7 @@ from main import (
     _make_clip_for_scene,
     _make_video_clip,
     _save_social_post,
+    validate_script_format,
 )
 
 
@@ -1201,7 +1203,7 @@ def test_make_video_clip_reuses_cached_trim_skips_normalize(tmp_path):
     # Pre-create the cached trimmed file that _make_video_clip would produce.
     start_time = 13.0
     end_time = 26.0
-    trimmed_name = f"scene_trim_{start_time * 1000:.0f}_{end_time * 1000:.0f}.mp4"
+    trimmed_name = f"scene_trim_{start_time:.3f}_{end_time:.3f}.mp4"
     cached_trim = tmp_path / trimmed_name
     cached_trim.write_bytes(b"cached trim content")
 
@@ -1438,3 +1440,255 @@ def test_main_micro_learning_uses_ffprobe_for_src_duration(tmp_path, monkeypatch
     ffprobe_mock.assert_called_once()
     call_path = ffprobe_mock.call_args[0][0]
     assert str(tmp_path / "source.mp4") in call_path
+
+
+# ---------------------------------------------------------------------------
+# _DEFAULT_SCENE_DURATION constant
+# ---------------------------------------------------------------------------
+
+
+def test_default_scene_duration_is_ten_seconds():
+    """_DEFAULT_SCENE_DURATION must be 10.0 seconds (the fallback when end_time is absent)."""
+    assert _DEFAULT_SCENE_DURATION == 10.0
+
+
+# ---------------------------------------------------------------------------
+# validate_script_format
+# ---------------------------------------------------------------------------
+
+
+def test_validate_script_format_fills_missing_end_time():
+    """validate_script_format must set end_time = start_time + 10 when end_time is absent."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5},
+        ],
+    }
+    result = validate_script_format(script)
+    scene = result["scenes"][0]
+    assert scene["end_time"] == 5 + _DEFAULT_SCENE_DURATION, (
+        f"end_time should be start_time + {_DEFAULT_SCENE_DURATION}, "
+        f"got {scene.get('end_time')}"
+    )
+
+
+def test_validate_script_format_preserves_existing_end_time():
+    """validate_script_format must NOT overwrite an existing numeric end_time."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 7},
+        ],
+    }
+    result = validate_script_format(script)
+    assert result["scenes"][0]["end_time"] == 7
+
+
+def test_validate_script_format_sets_missing_start_time_to_zero():
+    """validate_script_format must default start_time to 0 when absent."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original"},
+        ],
+    }
+    result = validate_script_format(script)
+    scene = result["scenes"][0]
+    assert scene["start_time"] == 0
+    assert scene["end_time"] == _DEFAULT_SCENE_DURATION
+
+
+def test_validate_script_format_skips_review_auto():
+    """validate_script_format must skip review scenes with duration='auto'."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 7},
+            {"type": "review", "duration": "auto"},
+        ],
+    }
+    result = validate_script_format(script)
+    review_scene = result["scenes"][1]
+    # end_time must NOT be injected into review-auto scenes
+    assert "end_time" not in review_scene
+
+
+def test_validate_script_format_no_video_source_returns_script_unchanged():
+    """validate_script_format must return script unchanged when video_source is absent."""
+    original_scene = {"type": "original", "start_time": 5}
+    script = {
+        "scenes": [original_scene.copy()],
+    }
+    result = validate_script_format(script)
+    assert "end_time" not in result["scenes"][0]
+
+
+def test_validate_script_format_returns_same_dict():
+    """validate_script_format must return the same dict object (mutates in-place)."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [{"type": "highlighted", "start_time": 10, "end_time": 15}],
+    }
+    result = validate_script_format(script)
+    assert result is script
+
+
+def test_validate_script_format_fills_end_time_for_all_video_scene_types():
+    """validate_script_format must fill end_time for original, highlighted, and review scenes."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 0},
+            {"type": "highlighted", "start_time": 5},
+            {"type": "review", "start_time": 0},  # no duration='auto'
+        ],
+    }
+    result = validate_script_format(script)
+    for i, scene in enumerate(result["scenes"]):
+        assert isinstance(scene.get("end_time"), (int, float)), (
+            f"Scene {i} (type={scene['type']}) should have a numeric end_time"
+        )
+        expected_end = scene["start_time"] + _DEFAULT_SCENE_DURATION
+        assert scene["end_time"] == expected_end, (
+            f"Scene {i} (type={scene['type']}) end_time should be "
+            f"start_time + {_DEFAULT_SCENE_DURATION} = {expected_end}, "
+            f"got {scene['end_time']}"
+        )
+
+
+def test_validate_script_format_skips_educational_scenes():
+    """validate_script_format must NOT touch educational scenes."""
+    edu_scene = {"type": "educational", "term": "CI/CD", "definition": "Continuous Integration"}
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [edu_scene.copy()],
+    }
+    result = validate_script_format(script)
+    assert "end_time" not in result["scenes"][0]
+    assert "start_time" not in result["scenes"][0]
+
+
+# ---------------------------------------------------------------------------
+# _make_video_clip – cache filename uses seconds with 3 decimal places
+# ---------------------------------------------------------------------------
+
+
+def test_make_video_clip_cache_filename_uses_seconds_format(tmp_path):
+    """_make_video_clip must generate cache filenames as scene_trim_{start:.3f}_{end:.3f}.mp4."""
+    fake_mp4 = tmp_path / "source.mp4"
+    fake_mp4.write_bytes(b"fake")
+
+    start_time = 5.0
+    end_time = 7.0
+    expected_name = f"scene_trim_{start_time:.3f}_{end_time:.3f}.mp4"
+
+    normalize_called = []
+
+    def fake_normalize(input_path, output_path, start, end):
+        normalize_called.append(os.path.basename(output_path))
+        return output_path
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = 2.0
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(main_module, "normalize_youtube_clip", side_effect=fake_normalize):
+            with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                _make_video_clip(
+                    str(fake_mp4),
+                    duration=2.0,
+                    start_time=start_time,
+                    end_time=end_time,
+                    tmp_dir=str(tmp_path),
+                )
+
+    assert normalize_called, "normalize_youtube_clip must be called"
+    assert normalize_called[0] == expected_name, (
+        f"Cache filename should be '{expected_name}', got '{normalize_called[0]}'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# main_micro_learning – _DEFAULT_SCENE_DURATION used when end_time is absent
+# ---------------------------------------------------------------------------
+
+
+def test_main_micro_learning_uses_default_duration_when_end_time_absent(tmp_path, monkeypatch):
+    """main_micro_learning must use _DEFAULT_SCENE_DURATION (10s) as fallback when
+    end_time is missing and NOT the 60-second long-asset threshold."""
+    long_source_duration = 3670.0  # ~1 hour
+
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original"},  # no start_time / end_time
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module, "_output_path_for_context", mock.Mock(return_value=str(tmp_path / "out.mp4"))
+    )
+    monkeypatch.setattr(
+        main_module, "_get_video_duration_ffprobe", mock.Mock(return_value=long_source_duration)
+    )
+
+    captured = []
+
+    def fake_make_clip_for_scene(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"duration": duration, "start_time": start_time, "end_time": end_time})
+        c = mock.MagicMock()
+        c.duration = duration
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip_for_scene)
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 10.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 10.0
+    mock_composite.audio = None
+    mock_composite.write_videofile.side_effect = RuntimeError("abort render")
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+    import asyncio
+    with pytest.raises(RuntimeError, match="abort render"):
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+
+    assert captured, "Expected _make_clip_for_scene to be called"
+    assert captured[0]["duration"] == _DEFAULT_SCENE_DURATION, (
+        f"Duration should be _DEFAULT_SCENE_DURATION ({_DEFAULT_SCENE_DURATION}s), "
+        f"not the 60s threshold. Got: {captured[0]['duration']}s"
+    )
+    assert captured[0]["end_time"] == _DEFAULT_SCENE_DURATION, (
+        f"end_time should be start_time (0) + {_DEFAULT_SCENE_DURATION}s, "
+        f"got: {captured[0]['end_time']}"
+    )
+
