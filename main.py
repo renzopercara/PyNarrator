@@ -71,6 +71,11 @@ _LONG_ASSET_THRESHOLD_SECONDS: float = 60.0
 # the final export, a warning is logged listing the scenes causing the bloat.
 _MAX_EXPORT_DURATION_SECONDS: float = 300.0
 
+# Default scene duration in seconds used when a scene has no explicit end_time.
+# JSON timestamps are the single source of truth; this fallback only applies
+# when end_time is completely absent from the script.
+_DEFAULT_SCENE_DURATION: float = 10.0
+
 # --- CONSTANTES DE ESTILO OPTIMIZADAS ---
 _ZOOM_RATE_NORMAL = 0.02
 _CONTRAST_BOOST = 1.15   
@@ -318,12 +323,13 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
         already_trimmed = False
         try:
             os.makedirs(tmp_dir, exist_ok=True)
-            # Use millisecond precision in the filename to avoid cache collisions
-            # between scenes with the same integer seconds but different fractional
-            # parts (e.g. start=1.2 vs start=1.8 both become "1").
+            # Use seconds with 3 decimal places (millisecond precision) in the
+            # filename to avoid cache collisions between scenes with the same
+            # integer seconds but different fractional parts (e.g. 1.200 vs 1.800).
+            # Format: scene_trim_{start:.3f}_{end:.3f}.mp4 (e.g. scene_trim_5.000_7.000.mp4)
             trimmed_path = os.path.join(
                 tmp_dir,
-                f"scene_trim_{start_time * 1000:.0f}_{trim_end * 1000:.0f}.mp4",
+                f"scene_trim_{start_time:.3f}_{trim_end:.3f}.mp4",
             )
             if os.path.exists(trimmed_path):
                 # Reuse the existing trimmed file to skip a redundant FFmpeg pass.
@@ -636,6 +642,69 @@ async def _generate_edu_audio(text: str, voice_key: str, idx: int) -> str:
     return path
 
 
+def validate_script_format(script: dict) -> dict:
+    """Validate and normalise a micro-learning script dict before rendering.
+
+    Enforces the rule that JSON timestamps are the single source of truth:
+
+    * For every scene of type ``"original"``, ``"highlighted"``, or
+      ``"review"`` (excluding review scenes with ``duration="auto"`` which
+      inherit from the first original scene at render time): if ``end_time``
+      is missing, it is set to ``start_time + _DEFAULT_SCENE_DURATION``.
+    * A warning is logged when ``start_time`` is absent so pipeline operators
+      can detect malformed scripts early.
+
+    The function mutates *script* in-place **and** returns it for call-chain
+    convenience.
+
+    Args:
+        script: Micro-learning script dict as produced by
+                :func:`src.micro_learning_generator.generate_micro_learning_script`.
+
+    Returns:
+        The same *script* dict with any missing ``end_time`` values filled in.
+    """
+    video_source = script.get("video_source", "")
+    scenes = script.get("scenes", [])
+
+    if not video_source:
+        # No video source → nothing to validate (educational-only scripts).
+        return script
+
+    video_scene_types = {"original", "highlighted", "review"}
+    for i, scene in enumerate(scenes):
+        scene_type = scene.get("type", "")
+        if scene_type not in video_scene_types:
+            continue
+
+        # Review scenes with duration="auto" inherit their window from the
+        # first original scene at render time; skip explicit validation here.
+        if scene_type == "review" and scene.get("duration") == "auto":
+            continue
+
+        start_time = scene.get("start_time")
+        if start_time is None:
+            logger.warning(
+                "⚠️ validate_script_format: Scene %d (type=%s) is missing "
+                "'start_time'. Defaulting to 0.",
+                i, scene_type,
+            )
+            start_time = 0
+            scene["start_time"] = 0
+
+        end_time = scene.get("end_time")
+        if not isinstance(end_time, (int, float)):
+            computed_end = start_time + _DEFAULT_SCENE_DURATION
+            logger.warning(
+                "⚠️ validate_script_format: Scene %d (type=%s) is missing a "
+                "numeric 'end_time'. Defaulting to start_time + %.0fs = %.3fs.",
+                i, scene_type, _DEFAULT_SCENE_DURATION, computed_end,
+            )
+            scene["end_time"] = computed_end
+
+    return script
+
+
 async def main_micro_learning(script: dict) -> None:
     """Process and render a micro-learning video from a structured script dict.
 
@@ -656,6 +725,10 @@ async def main_micro_learning(script: dict) -> None:
     """
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Validate and normalise the script: fill in missing end_time values and
+    # log warnings for incomplete scenes before any rendering begins.
+    script = validate_script_format(script)
 
     metadata = script.get("metadata", {})
     raw_video_source = script.get("video_source", "")
@@ -739,29 +812,25 @@ async def main_micro_learning(script: dict) -> None:
                     )
 
                 # Fallback duration is used only for non-MP4 assets (e.g. ColorClip).
-                # Strict Duration Capping / "0s-ends" fix:
-                # When end_time is absent or the string "ends" AND the source is a
-                # long-form asset (> threshold), force an explicit end_time equal to
-                # start_time + threshold so that the FFmpeg trim pass – and
-                # subsequently MoviePy – never inherit the full source duration.
+                # JSON timestamps are the single source of truth: use end_time - start_time
+                # when end_time is explicitly provided.  When end_time is absent (no
+                # explicit timestamp in the script), fall back to _DEFAULT_SCENE_DURATION
+                # (10 s) regardless of the source length.  validate_script_format() has
+                # already filled in end_time for standard scenes, so reaching this branch
+                # means only review-auto scenes (which inherit below) or unusual edge cases.
                 if scene_end is not None:
                     fallback_duration = scene_end - scene_start
-                elif src_duration > _LONG_ASSET_THRESHOLD_SECONDS:
-                    fallback_duration = _LONG_ASSET_THRESHOLD_SECONDS
+                else:
+                    fallback_duration = _DEFAULT_SCENE_DURATION
                     scene_end = scene_start + fallback_duration
                     logger.warning(
-                        "🔒 Scene %d: long-form source detected (%.0fs > %.0fs threshold)."
-                        " Forcing end_time=%.1fs (start=%.1fs + cap=%.0fs).",
-                        i, src_duration, _LONG_ASSET_THRESHOLD_SECONDS,
-                        scene_end, scene_start, fallback_duration,
+                        "⚠️ Scene %d (type=%s): no end_time resolved; defaulting to "
+                        "start + %.0fs = %.3fs.",
+                        i, scene_type, _DEFAULT_SCENE_DURATION, scene_end,
                     )
-                else:
-                    fallback_duration = src_duration
                 logger.info(
-                    "[Processing Scene %d] Type: %s | Path: %s | Duration: %.1fs"
-                    " | Window: %ss–%ss | Resolution: %s",
-                    i, scene_type, video_source, fallback_duration,
-                    scene_start, scene_end if scene_end is not None else "end", VIDEO_RES,
+                    "[Trim] Scene %d: Source=%s | Start=%.3f | End=%.3f | Duration=%.3fs",
+                    i, video_source, scene_start, scene_end, fallback_duration,
                 )
                 clip = _make_clip_for_scene(
                     video_source, fallback_duration, zoom_in=False,
