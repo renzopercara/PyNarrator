@@ -31,6 +31,7 @@ from main import (
     _enhance_frame,
     _make_clip_for_scene,
     _make_video_clip,
+    _purge_stale_scene_trims,
     _save_social_post,
     validate_script_format,
 )
@@ -1534,8 +1535,10 @@ def test_validate_script_format_returns_same_dict():
     assert result is script
 
 
-def test_validate_script_format_fills_end_time_for_all_video_scene_types():
-    """validate_script_format must fill end_time for original, highlighted, and review scenes."""
+def test_validate_script_format_fills_end_time_for_original_scenes_only():
+    """validate_script_format must fill end_time only for 'original' scenes that lack
+    it; highlighted and review scenes without timestamps are left as-is so the render
+    loop can apply Temporal Inheritance from the nearest original scene."""
     script = {
         "video_source": "assets/video/source.mp4",
         "scenes": [
@@ -1545,16 +1548,16 @@ def test_validate_script_format_fills_end_time_for_all_video_scene_types():
         ],
     }
     result = validate_script_format(script)
-    for i, scene in enumerate(result["scenes"]):
-        assert isinstance(scene.get("end_time"), (int, float)), (
-            f"Scene {i} (type={scene['type']}) should have a numeric end_time"
-        )
-        expected_end = scene["start_time"] + _DEFAULT_SCENE_DURATION
-        assert scene["end_time"] == expected_end, (
-            f"Scene {i} (type={scene['type']}) end_time should be "
-            f"start_time + {_DEFAULT_SCENE_DURATION} = {expected_end}, "
-            f"got {scene['end_time']}"
-        )
+    # Only the original scene should receive a default end_time.
+    assert result["scenes"][0]["end_time"] == _DEFAULT_SCENE_DURATION, (
+        "original scene should get start_time + _DEFAULT_SCENE_DURATION"
+    )
+    assert "end_time" not in result["scenes"][1], (
+        "highlighted scene must NOT get a default end_time (leave for inheritance)"
+    )
+    assert "end_time" not in result["scenes"][2], (
+        "review scene must NOT get a default end_time (leave for inheritance)"
+    )
 
 
 def test_validate_script_format_skips_educational_scenes():
@@ -1883,4 +1886,514 @@ def test_main_micro_learning_logs_video_engine_processing_line(tmp_path, monkeyp
     assert "original" in log_line, f"Log should mention scene type. Got: {log_line}"
     assert "5" in log_line, f"Log should mention start_time 5. Got: {log_line}"
     assert "8" in log_line, f"Log should mention end_time 8. Got: {log_line}"
+
+
+# ---------------------------------------------------------------------------
+# validate_script_format – Temporal Inheritance (no 10 s fill for
+# highlighted / review)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_script_format_does_not_fill_end_time_for_highlighted():
+    """validate_script_format must NOT inject end_time into highlighted scenes;
+    the render loop will apply Temporal Inheritance instead."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 10},
+            {"type": "highlighted", "start_time": 5},
+        ],
+    }
+    result = validate_script_format(script)
+    highlighted = result["scenes"][1]
+    assert "end_time" not in highlighted, (
+        "highlighted scene must NOT have end_time injected by validate_script_format; "
+        f"got {highlighted.get('end_time')}"
+    )
+
+
+def test_validate_script_format_does_not_fill_end_time_for_review_without_auto():
+    """validate_script_format must NOT inject end_time into a review scene that has
+    no explicit timestamps (even without duration='auto')."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 10},
+            {"type": "review", "start_time": 0},
+        ],
+    }
+    result = validate_script_format(script)
+    review = result["scenes"][1]
+    assert "end_time" not in review, (
+        "review scene without duration='auto' must NOT have end_time injected; "
+        f"got {review.get('end_time')}"
+    )
+
+
+def test_validate_script_format_still_validates_explicit_end_time_for_highlighted():
+    """validate_script_format must raise ValueError when a highlighted scene has
+    end_time <= start_time (explicit invalid timestamps)."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "highlighted", "start_time": 10, "end_time": 5},
+        ],
+    }
+    with pytest.raises(ValueError, match="end_time"):
+        validate_script_format(script)
+
+
+def test_validate_script_format_still_validates_explicit_end_time_for_review():
+    """validate_script_format must raise ValueError when a review scene has
+    end_time <= start_time (explicit invalid timestamps)."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "review", "start_time": 20, "end_time": 10},
+        ],
+    }
+    with pytest.raises(ValueError, match="end_time"):
+        validate_script_format(script)
+
+
+# ---------------------------------------------------------------------------
+# Temporal Inheritance in main_micro_learning
+# ---------------------------------------------------------------------------
+
+
+def _make_base_monkeypatches(monkeypatch, tmp_path):
+    """Helper: apply the standard monkeypatches needed by main_micro_learning tests."""
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module,
+        "_output_path_for_context",
+        mock.Mock(return_value=str(tmp_path / "out.mp4")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_get_video_duration_ffprobe",
+        mock.Mock(return_value=3600.0),
+    )
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 26.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 26.0
+    mock_composite.audio = None
+    mock_composite.write_videofile.side_effect = RuntimeError("abort render")
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+
+def test_main_micro_learning_highlighted_inherits_original_timestamps(tmp_path, monkeypatch):
+    """A highlighted scene without explicit timestamps must inherit start/end
+    from the nearest preceding original scene (Temporal Inheritance)."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 13, "end_time": 26},
+            {"type": "highlighted", "keywords": ["CI/CD"]},  # no timestamps
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    captured = []
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time})
+        c = mock.MagicMock()
+        c.duration = duration if duration else 13.0
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert len(captured) == 2, f"Expected 2 video scene calls, got {len(captured)}"
+    highlighted_call = captured[1]
+    assert highlighted_call["start_time"] == 13, (
+        f"highlighted start_time should inherit 13 from original, "
+        f"got {highlighted_call['start_time']}"
+    )
+    assert highlighted_call["end_time"] == 26, (
+        f"highlighted end_time should inherit 26 from original, "
+        f"got {highlighted_call['end_time']}"
+    )
+
+
+def test_main_micro_learning_review_without_auto_inherits_original_timestamps(tmp_path, monkeypatch):
+    """A review scene without explicit timestamps (and without duration='auto')
+    must inherit start/end from the nearest original scene."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 15},
+            {"type": "review"},  # no timestamps, no duration='auto'
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    captured = []
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time})
+        c = mock.MagicMock()
+        c.duration = duration if duration else 10.0
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert len(captured) == 2, f"Expected 2 video scene calls, got {len(captured)}"
+    review_call = captured[1]
+    assert review_call["start_time"] == 5, (
+        f"review start_time should inherit 5 from original, got {review_call['start_time']}"
+    )
+    assert review_call["end_time"] == 15, (
+        f"review end_time should inherit 15 from original, got {review_call['end_time']}"
+    )
+
+
+def test_main_micro_learning_inherits_nearest_preceding_original(tmp_path, monkeypatch):
+    """highlighted/review must inherit from the *nearest preceding* original
+    scene, not always the first one."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 0, "end_time": 10},
+            {"type": "original", "start_time": 20, "end_time": 30},
+            {"type": "highlighted"},  # should inherit from the second original
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    captured = []
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time})
+        c = mock.MagicMock()
+        c.duration = duration if duration else 10.0
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert len(captured) == 3, f"Expected 3 video scene calls, got {len(captured)}"
+    highlighted_call = captured[2]
+    assert highlighted_call["start_time"] == 20, (
+        "highlighted should inherit from nearest preceding original (start=20), "
+        f"got {highlighted_call['start_time']}"
+    )
+    assert highlighted_call["end_time"] == 30, (
+        "highlighted should inherit from nearest preceding original (end=30), "
+        f"got {highlighted_call['end_time']}"
+    )
+
+
+def test_main_micro_learning_safety_cap_applied_when_no_original_scene(tmp_path, monkeypatch):
+    """When a highlighted/review scene has no timestamps AND there is no original
+    scene anywhere in the script, the 10 s Safety Cap must be applied as last resort."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "highlighted"},  # no timestamps and no original scene
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    captured = []
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time, "duration": duration})
+        c = mock.MagicMock()
+        c.duration = duration if duration else _DEFAULT_SCENE_DURATION
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert captured, "Expected _make_clip_for_scene to be called"
+    call = captured[0]
+    assert call["duration"] == _DEFAULT_SCENE_DURATION, (
+        f"Safety Cap should be _DEFAULT_SCENE_DURATION ({_DEFAULT_SCENE_DURATION}s), "
+        f"got {call['duration']}"
+    )
+    assert call["end_time"] == _DEFAULT_SCENE_DURATION, (
+        f"end_time should be start(0) + {_DEFAULT_SCENE_DURATION}s, "
+        f"got {call['end_time']}"
+    )
+
+
+def test_main_micro_learning_temporal_inheritance_info_log(tmp_path, monkeypatch, caplog):
+    """main_micro_learning must emit an INFO log with 'Inheriting' when a
+    highlighted scene takes its timestamps from an original scene."""
+    import logging
+
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 7, "end_time": 14},
+            {"type": "highlighted"},  # no timestamps → should inherit
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        c = mock.MagicMock()
+        c.duration = duration if duration else 7.0
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    with caplog.at_level(logging.INFO):
+        try:
+            asyncio.get_event_loop().run_until_complete(
+                main_module.main_micro_learning(script)
+            )
+        except RuntimeError:
+            pass
+
+    inherit_logs = [r.message for r in caplog.records if "Inheriting" in r.message]
+    assert inherit_logs, (
+        "Expected at least one log message containing 'Inheriting'. "
+        f"All log messages: {[r.message for r in caplog.records]}"
+    )
+    log_line = inherit_logs[0]
+    assert "7" in log_line, f"Inheritance log should mention start=7. Got: {log_line}"
+    assert "14" in log_line, f"Inheritance log should mention end=14. Got: {log_line}"
+
+
+def test_main_micro_learning_highlighted_explicit_times_not_overridden(tmp_path, monkeypatch):
+    """A highlighted scene with explicit start_time and end_time must NOT have its
+    timestamps replaced by Temporal Inheritance."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 0, "end_time": 10},
+            {"type": "highlighted", "start_time": 30, "end_time": 45},
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    _make_base_monkeypatches(monkeypatch, tmp_path)
+
+    captured = []
+
+    def fake_make_clip(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time})
+        c = mock.MagicMock()
+        c.duration = duration if duration else 15.0
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip)
+
+    import asyncio
+    try:
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+    except RuntimeError:
+        pass
+
+    assert len(captured) == 2, f"Expected 2 video calls, got {len(captured)}"
+    highlighted_call = captured[1]
+    assert highlighted_call["start_time"] == 30, (
+        f"Explicit start_time=30 must not be overridden. Got: {highlighted_call['start_time']}"
+    )
+    assert highlighted_call["end_time"] == 45, (
+        f"Explicit end_time=45 must not be overridden. Got: {highlighted_call['end_time']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _purge_stale_scene_trims
+# ---------------------------------------------------------------------------
+
+
+def test_purge_stale_scene_trims_removes_old_files(tmp_path):
+    """_purge_stale_scene_trims must delete scene_trim_*.mp4 files that are
+    older than script.json."""
+    import time
+
+    # Create a fake old trim cache file
+    stale_trim_file = tmp_path / "scene_trim_5.000_10.000.mp4"
+    stale_trim_file.write_bytes(b"fake")
+
+    # Set the trim file's mtime to 1 second in the past
+    old_mtime = os.path.getmtime(str(stale_trim_file)) - 1.0
+    os.utime(str(stale_trim_file), (old_mtime, old_mtime))
+
+    # Create the script file with a newer mtime
+    script_file = tmp_path / "script.json"
+    script_file.write_text("{}")
+    # Give the script file the current time (newer than the trim)
+    now = time.time()
+    os.utime(str(script_file), (now, now))
+
+    removed = _purge_stale_scene_trims(str(tmp_path), str(script_file))
+
+    assert removed == 1, f"Expected 1 stale file removed, got {removed}"
+    assert not stale_trim_file.exists(), "Old trim file should have been deleted"
+
+
+def test_purge_stale_scene_trims_keeps_fresh_files(tmp_path):
+    """_purge_stale_scene_trims must NOT delete scene_trim_*.mp4 files that are
+    newer than (or same age as) script.json."""
+    import time
+
+    # Create script.json first (older)
+    script_file = tmp_path / "script.json"
+    script_file.write_text("{}")
+    old_time = time.time() - 2.0
+    os.utime(str(script_file), (old_time, old_time))
+
+    # Create a trim file with a newer mtime
+    fresh_trim = tmp_path / "scene_trim_0.000_10.000.mp4"
+    fresh_trim.write_bytes(b"fake")
+    now = time.time()
+    os.utime(str(fresh_trim), (now, now))
+
+    removed = _purge_stale_scene_trims(str(tmp_path), str(script_file))
+
+    assert removed == 0, f"Expected 0 files removed, got {removed}"
+    assert fresh_trim.exists(), "Fresh trim file must not be deleted"
+
+
+def test_purge_stale_scene_trims_ignores_non_trim_files(tmp_path):
+    """_purge_stale_scene_trims must only touch scene_trim_*.mp4 files, not
+    other files in the tmp directory."""
+    import time
+
+    other_file = tmp_path / "youtube_raw.mp4"
+    other_file.write_bytes(b"fake")
+    old_time = time.time() - 5.0
+    os.utime(str(other_file), (old_time, old_time))
+
+    script_file = tmp_path / "script.json"
+    script_file.write_text("{}")
+
+    _purge_stale_scene_trims(str(tmp_path), str(script_file))
+
+    assert other_file.exists(), "Non scene_trim_ file must not be deleted"
+
+
+def test_purge_stale_scene_trims_returns_zero_when_script_missing(tmp_path):
+    """_purge_stale_scene_trims must return 0 and do nothing when script_path
+    does not exist."""
+    removed = _purge_stale_scene_trims(str(tmp_path), str(tmp_path / "nonexistent.json"))
+    assert removed == 0
+
+
+def test_purge_stale_scene_trims_returns_zero_when_tmp_dir_missing(tmp_path):
+    """_purge_stale_scene_trims must return 0 when tmp_dir does not exist."""
+    script_file = tmp_path / "script.json"
+    script_file.write_text("{}")
+    removed = _purge_stale_scene_trims(str(tmp_path / "no_such_dir"), str(script_file))
+    assert removed == 0
+
+
+# ---------------------------------------------------------------------------
+# _make_video_clip – normalize_youtube_clip receives float strings
+# ---------------------------------------------------------------------------
+
+
+def test_make_video_clip_normalize_receives_float_strings(tmp_path):
+    """_make_video_clip must convert start_time and end_time to float before
+    passing to normalize_youtube_clip so that integer values like 1 become '1.0'
+    rather than '1' (prevents potential rounding artefacts in FFmpeg)."""
+    fake_mp4 = tmp_path / "source.mp4"
+    fake_mp4.write_bytes(b"fake")
+
+    normalize_args = []
+
+    def fake_normalize(input_path, output_path, start, end):
+        normalize_args.append((start, end))
+        return output_path
+
+    mock_clip = mock.MagicMock()
+    mock_clip.mask = None
+    mock_clip.w = 1280
+    mock_clip.h = 720
+    mock_clip.duration = 3.0
+    mock_clip.size = (1280, 720)
+    mock_clip.fps = 24
+    mock_clip.set_fps.return_value = mock_clip
+    mock_clip.set_opacity.return_value = mock_clip
+    mock_clip.set_duration.return_value = mock_clip
+    mock_clip.resize.return_value = mock_clip
+    mock_clip.crop.return_value = mock_clip
+    mock_clip.fl_image.return_value = mock_clip
+    mock_clip.set_position.return_value = mock_clip
+    mock_clip.set_audio.return_value = mock_clip
+
+    with mock.patch.object(main_module, "VideoFileClip", return_value=mock_clip):
+        with mock.patch.object(main_module, "normalize_youtube_clip", side_effect=fake_normalize):
+            with mock.patch.object(main_module, "CompositeVideoClip") as mock_cv:
+                mock_cv.return_value.set_duration.return_value = mock_cv.return_value
+                mock_cv.return_value.set_audio.return_value = mock_cv.return_value
+                _make_video_clip(
+                    str(fake_mp4),
+                    duration=3.0,
+                    start_time=5,    # integer – must be converted to float
+                    end_time=8,      # integer – must be converted to float
+                    tmp_dir=str(tmp_path),
+                )
+
+    assert normalize_args, "normalize_youtube_clip must be called"
+    start_str, end_str = normalize_args[0]
+    assert "." in start_str, (
+        f"start passed to normalize_youtube_clip should be a float string (e.g. '5.0'), "
+        f"got '{start_str}'"
+    )
+    assert "." in end_str, (
+        f"end passed to normalize_youtube_clip should be a float string (e.g. '8.0'), "
+        f"got '{end_str}'"
+    )
 

@@ -341,7 +341,8 @@ def _make_video_clip(asset_path: str, duration: float, start_time: float, end_ti
                 )
             else:
                 load_path = normalize_youtube_clip(
-                    asset_path, trimmed_path, str(start_time), str(trim_end)
+                    asset_path, trimmed_path,
+                    str(float(start_time)), str(float(trim_end)),
                 )
                 already_trimmed = True
                 logger.debug(
@@ -647,12 +648,18 @@ def validate_script_format(script: dict) -> dict:
 
     Enforces the rule that JSON timestamps are the single source of truth:
 
-    * For every scene of type ``"original"``, ``"highlighted"``, or
-      ``"review"`` (excluding review scenes with ``duration="auto"`` which
-      inherit from the first original scene at render time): if ``end_time``
-      is missing, it is set to ``start_time + _DEFAULT_SCENE_DURATION``.
-    * A warning is logged when ``start_time`` is absent so pipeline operators
-      can detect malformed scripts early.
+    * For ``"original"`` scenes: if ``end_time`` is missing it is set to
+      ``start_time + _DEFAULT_SCENE_DURATION`` (10 s safety cap).
+    * For ``"highlighted"`` and ``"review"`` scenes: missing timestamps are
+      intentionally left absent so the render loop can apply *Temporal
+      Inheritance* (copying the window from the nearest ``"original"`` scene).
+      The 10 s default is never written for these types.
+    * ``"review"`` scenes with ``duration="auto"`` are also skipped (they
+      inherit from the first original scene at render time).
+    * A warning is logged when ``start_time`` is absent on an ``"original"``
+      scene so pipeline operators can detect malformed scripts early.
+    * ``ValueError`` is raised when *both* ``start_time`` and ``end_time`` are
+      explicitly provided but ``end_time <= start_time``.
 
     The function mutates *script* in-place **and** returns it for call-chain
     convenience.
@@ -662,7 +669,8 @@ def validate_script_format(script: dict) -> dict:
                 :func:`src.micro_learning_generator.generate_micro_learning_script`.
 
     Returns:
-        The same *script* dict with any missing ``end_time`` values filled in.
+        The same *script* dict with any missing ``end_time`` values filled in
+        for ``"original"`` scenes.
     """
     video_source = script.get("video_source", "")
     scenes = script.get("scenes", [])
@@ -677,11 +685,22 @@ def validate_script_format(script: dict) -> dict:
         if scene_type not in video_scene_types:
             continue
 
-        # Review scenes with duration="auto" inherit their window from the
-        # first original scene at render time; skip explicit validation here.
-        if scene_type == "review" and scene.get("duration") == "auto":
+        # highlighted and review scenes without explicit timestamps will
+        # inherit their window from the nearest original scene at render time
+        # (Temporal Inheritance).  Do not fill in a 10 s default here.
+        # Only validate end_time > start_time if both are explicitly present.
+        if scene_type in ("highlighted", "review"):
+            end_time = scene.get("end_time")
+            start_time = scene.get("start_time", 0)
+            if isinstance(end_time, (int, float)) and end_time <= start_time:
+                raise ValueError(
+                    f"Scene {i} (type={scene_type}): end_time ({end_time}) must be "
+                    f"greater than start_time ({start_time}). Check script.json for "
+                    f"incorrect timestamps."
+                )
             continue
 
+        # For "original" scenes: apply the 10 s safety cap when end_time is absent.
         start_time = scene.get("start_time")
         if start_time is None:
             logger.warning(
@@ -709,6 +728,52 @@ def validate_script_format(script: dict) -> dict:
             )
 
     return script
+
+
+def _purge_stale_scene_trims(tmp_dir: str, script_path: str) -> int:
+    """Delete cached ``scene_trim_*.mp4`` files that are older than *script_path*.
+
+    When ``script.json`` is edited after a previous render the trim cache may
+    contain clips produced from the old timestamps (often the 10 s defaults).
+    Calling this function before a new render ensures FFmpeg re-trims each
+    scene from the updated script rather than serving stale clips.
+
+    Args:
+        tmp_dir:     Directory that holds ``scene_trim_*.mp4`` cache files
+                     (typically ``assets/tmp``).
+        script_path: Path to the script JSON file whose modification time is
+                     used as the freshness threshold.
+
+    Returns:
+        Number of stale files removed.
+    """
+    if not os.path.exists(script_path):
+        return 0
+
+    script_mtime = os.path.getmtime(script_path)
+    removed = 0
+
+    if not os.path.isdir(tmp_dir):
+        return 0
+
+    for fname in os.listdir(tmp_dir):
+        if not (fname.startswith("scene_trim_") and fname.endswith(".mp4")):
+            continue
+        fpath = os.path.join(tmp_dir, fname)
+        try:
+            if os.path.getmtime(fpath) < script_mtime:
+                os.remove(fpath)
+                removed += 1
+                logger.debug("🗑️ Removed stale trim cache: %s", fpath)
+        except OSError as exc:
+            logger.warning("⚠️ Could not remove stale trim cache %s: %s", fpath, exc)
+
+    if removed:
+        logger.info(
+            "🧹 Purged %d stale scene_trim_* file(s) (script.json was modified).",
+            removed,
+        )
+    return removed
 
 
 async def main_micro_learning(script: dict) -> None:
@@ -771,8 +836,10 @@ async def main_micro_learning(script: dict) -> None:
             video_source, raw_video_source,
         )
 
-    # Pre-pass: locate first "original" scene so "review" scenes with
-    # duration="auto" can inherit its time window.
+    # Pre-pass: locate the first "original" scene so that "highlighted" and
+    # "review" scenes without explicit timestamps can inherit its time window
+    # (Temporal Inheritance).  Also used as the ultimate fallback reference
+    # when no nearer original scene has been seen yet.
     first_original_scene = next(
         (s for s in scenes if s.get("type") == "original"), None
     )
@@ -783,6 +850,10 @@ async def main_micro_learning(script: dict) -> None:
     scene_clips = []
     scene_clip_labels: list[str] = []  # scene type label for each entry in scene_clips
     edu_audio_paths = []
+
+    # Track the most recently processed "original" scene to enable "nearest
+    # original" inheritance for highlighted/review scenes that follow it.
+    last_original_scene = None
 
     try:
         for i, scene in enumerate(scenes):
@@ -797,9 +868,9 @@ async def main_micro_learning(script: dict) -> None:
                 raw_end = scene.get("end_time")
                 scene_end = raw_end if isinstance(raw_end, (int, float)) else None
 
-                # Auto-duration: review scene inherits the time window of the
-                # first original scene, effectively "looping" the listening
-                # context without distractions.
+                # Auto-duration: review scene with duration="auto" inherits the
+                # time window of the first original scene, effectively "looping"
+                # the listening context without distractions.
                 if (
                     scene_type == "review"
                     and scene.get("duration") == "auto"
@@ -819,23 +890,48 @@ async def main_micro_learning(script: dict) -> None:
                         i, scene_start, scene_end,
                     )
 
+                # Temporal Inheritance: if a highlighted or review scene has no
+                # explicit end_time (and therefore no reliable time window), copy
+                # the window from the nearest preceding original scene, falling
+                # back to the first original scene anywhere in the script.
+                # The 10 s Safety Cap is applied only as a last resort when no
+                # original scene exists at all.
+                if scene_type in ("highlighted", "review") and scene_end is None:
+                    reference_scene = last_original_scene or first_original_scene
+                    if reference_scene is not None:
+                        ref_start = reference_scene.get("start_time")
+                        ref_end = reference_scene.get("end_time")
+                        # Inherit start only when it was not explicitly provided.
+                        if raw_start is None:
+                            scene_start = ref_start if ref_start is not None else 0
+                        if isinstance(ref_end, (int, float)):
+                            scene_end = ref_end
+                        logger.info(
+                            "Scene %d (%s): No timestamps found. "
+                            "Inheriting %s-%s from reference scene.",
+                            i, scene_type, scene_start, scene_end,
+                        )
+
                 # Fallback duration is used only for non-MP4 assets (e.g. ColorClip).
                 # JSON timestamps are the single source of truth: use end_time - start_time
-                # when end_time is explicitly provided.  When end_time is absent (no
-                # explicit timestamp in the script), fall back to _DEFAULT_SCENE_DURATION
-                # (10 s) regardless of the source length.  validate_script_format() has
-                # already filled in end_time for standard scenes, so reaching this branch
-                # means only review-auto scenes (which inherit below) or unusual edge cases.
+                # when end_time is explicitly provided.  When end_time is still absent
+                # after Temporal Inheritance (no original scene exists anywhere), apply
+                # the 10 s Safety Cap as a last resort.
                 if scene_end is not None:
                     fallback_duration = scene_end - scene_start
                 else:
                     fallback_duration = _DEFAULT_SCENE_DURATION
                     scene_end = scene_start + fallback_duration
                     logger.warning(
-                        "⚠️ Scene %d (type=%s): no end_time resolved; defaulting to "
-                        "start + %.0fs = %.3fs.",
+                        "⚠️ Scene %d (type=%s): no end_time resolved and no "
+                        "reference original scene found; applying %.0fs Safety Cap "
+                        "= %.3fs.",
                         i, scene_type, _DEFAULT_SCENE_DURATION, scene_end,
                     )
+
+                # Track original scenes for subsequent inheritance lookups.
+                if scene_type == "original":
+                    last_original_scene = scene
                 logger.info(
                     "[VIDEO_ENGINE] Processing %s (ID: %d): %.3fs to %.3fs (Total: %.3fs)",
                     scene_type, i, scene_start, scene_end, fallback_duration,
@@ -1032,11 +1128,18 @@ async def main(target_platform: str = "Instagram") -> None:
     final_video = None
 
     try:
-        with open("script.json", "r", encoding="utf-8") as f:
+        _script_path = "script.json"
+        with open(_script_path, "r", encoding="utf-8") as f:
             script = json.load(f)
 
         # Dispatch: micro-learning format (dict with metadata + scenes) vs. legacy list
         if _is_micro_learning_script(script):
+            # Purge any scene_trim_* cache files that are older than script.json
+            # to prevent FFmpeg from reusing clips built from outdated timestamps.
+            _tmp_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "assets", "tmp"
+            )
+            _purge_stale_scene_trims(_tmp_dir, _script_path)
             await main_micro_learning(script)
             # Generate social copy from micro-learning scenes.
             scenes_as_list = [
