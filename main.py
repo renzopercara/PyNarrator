@@ -701,6 +701,12 @@ def validate_script_format(script: dict) -> dict:
                 i, scene_type, _DEFAULT_SCENE_DURATION, computed_end,
             )
             scene["end_time"] = computed_end
+        elif end_time <= start_time:
+            raise ValueError(
+                f"Scene {i} (type={scene_type}): end_time ({end_time}) must be "
+                f"greater than start_time ({start_time}). Check script.json for "
+                f"incorrect timestamps."
+            )
 
     return script
 
@@ -784,9 +790,10 @@ async def main_micro_learning(script: dict) -> None:
 
             if scene_type in ("original", "highlighted", "review"):
                 # Load the video source using start_time/end_time when present.
-                # "ends" (string) is normalised to None so the branch below
-                # can force a concrete end_time for long-form sources.
-                scene_start = scene.get("start_time") or 0
+                # Use explicit `is not None` checks so that start_time=0 is never
+                # treated as falsy/absent.
+                raw_start = scene.get("start_time")
+                scene_start = raw_start if raw_start is not None else 0
                 raw_end = scene.get("end_time")
                 scene_end = raw_end if isinstance(raw_end, (int, float)) else None
 
@@ -798,7 +805,8 @@ async def main_micro_learning(script: dict) -> None:
                     and scene.get("duration") == "auto"
                     and first_original_scene is not None
                 ):
-                    scene_start = first_original_scene.get("start_time") or 0
+                    orig_start = first_original_scene.get("start_time")
+                    scene_start = orig_start if orig_start is not None else 0
                     raw_orig_end = first_original_scene.get("end_time")
                     scene_end = (
                         raw_orig_end
@@ -828,6 +836,10 @@ async def main_micro_learning(script: dict) -> None:
                         "start + %.0fs = %.3fs.",
                         i, scene_type, _DEFAULT_SCENE_DURATION, scene_end,
                     )
+                logger.info(
+                    "[VIDEO_ENGINE] Processing %s (ID: %d): %.3fs to %.3fs (Total: %.3fs)",
+                    scene_type, i, scene_start, scene_end, fallback_duration,
+                )
                 logger.info(
                     "[Trim] Scene %d: Source=%s | Start=%.3f | End=%.3f | Duration=%.3fs",
                     i, video_source, scene_start, scene_end, fallback_duration,

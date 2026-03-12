@@ -1692,3 +1692,195 @@ def test_main_micro_learning_uses_default_duration_when_end_time_absent(tmp_path
         f"got: {captured[0]['end_time']}"
     )
 
+
+# ---------------------------------------------------------------------------
+# validate_script_format – ValueError on end_time <= start_time
+# ---------------------------------------------------------------------------
+
+
+def test_validate_script_format_raises_when_end_time_equals_start_time():
+    """validate_script_format must raise ValueError when end_time == start_time."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 5},
+        ],
+    }
+    with pytest.raises(ValueError, match="end_time"):
+        validate_script_format(script)
+
+
+def test_validate_script_format_raises_when_end_time_before_start_time():
+    """validate_script_format must raise ValueError when end_time < start_time."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 10, "end_time": 5},
+        ],
+    }
+    with pytest.raises(ValueError, match="end_time"):
+        validate_script_format(script)
+
+
+def test_validate_script_format_raises_includes_scene_info_in_message():
+    """ValueError message must mention scene index, type, end_time and start_time."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "highlighted", "start_time": 20, "end_time": 10},
+        ],
+    }
+    with pytest.raises(ValueError) as exc_info:
+        validate_script_format(script)
+    msg = str(exc_info.value)
+    assert "20" in msg, f"Message should mention start_time 20, got: {msg}"
+    assert "10" in msg, f"Message should mention end_time 10, got: {msg}"
+
+
+def test_validate_script_format_valid_times_do_not_raise():
+    """validate_script_format must NOT raise for valid end_time > start_time."""
+    script = {
+        "video_source": "assets/video/source.mp4",
+        "scenes": [
+            {"type": "original", "start_time": 1, "end_time": 2},
+        ],
+    }
+    result = validate_script_format(script)
+    assert result["scenes"][0]["end_time"] == 2
+
+
+# ---------------------------------------------------------------------------
+# main_micro_learning – start_time=0 is not treated as absent (is not None fix)
+# ---------------------------------------------------------------------------
+
+
+def test_main_micro_learning_start_time_zero_is_not_treated_as_absent(tmp_path, monkeypatch):
+    """main_micro_learning must pass start_time=0 correctly and not default to a
+    different value.  start_time=0 must be preserved because 0 is falsy in Python
+    but is a valid timestamp (e.g. clip starts at the very beginning of the source)."""
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 0, "end_time": 3},
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module, "_output_path_for_context", mock.Mock(return_value=str(tmp_path / "out.mp4"))
+    )
+    monkeypatch.setattr(
+        main_module, "_get_video_duration_ffprobe", mock.Mock(return_value=30.0)
+    )
+
+    captured = []
+
+    def fake_make_clip_for_scene(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        captured.append({"start_time": start_time, "end_time": end_time, "duration": duration})
+        c = mock.MagicMock()
+        c.duration = duration
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip_for_scene)
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 3.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 3.0
+    mock_composite.audio = None
+    mock_composite.write_videofile.side_effect = RuntimeError("abort render")
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+    import asyncio
+    with pytest.raises(RuntimeError, match="abort render"):
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+
+    assert captured, "Expected _make_clip_for_scene to be called"
+    assert captured[0]["start_time"] == 0, (
+        f"start_time=0 must be preserved (not replaced by a falsy-default). "
+        f"Got: {captured[0]['start_time']}"
+    )
+    assert captured[0]["end_time"] == 3, (
+        f"end_time should be 3 (from script). Got: {captured[0]['end_time']}"
+    )
+    assert captured[0]["duration"] == 3, (
+        f"duration should be end_time - start_time = 3. Got: {captured[0]['duration']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# main_micro_learning – [VIDEO_ENGINE] log line at scene start
+# ---------------------------------------------------------------------------
+
+
+def test_main_micro_learning_logs_video_engine_processing_line(tmp_path, monkeypatch, caplog):
+    """main_micro_learning must emit a '[VIDEO_ENGINE] Processing ...' log line
+    at the start of each video scene (original, highlighted, review)."""
+    import logging
+
+    script = {
+        "metadata": {"tone": "INFORMATIVE", "narrator_voice": "H"},
+        "video_source": str(tmp_path / "source.mp4"),
+        "scenes": [
+            {"type": "original", "start_time": 5, "end_time": 8},
+        ],
+    }
+    (tmp_path / "source.mp4").write_bytes(b"fake")
+
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "AUDIO_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(main_module, "SFX_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main_module, "_output_path_for_context", mock.Mock(return_value=str(tmp_path / "out.mp4"))
+    )
+    monkeypatch.setattr(
+        main_module, "_get_video_duration_ffprobe", mock.Mock(return_value=30.0)
+    )
+
+    def fake_make_clip_for_scene(asset, duration, zoom_in=True, start_time=0, end_time=None):
+        c = mock.MagicMock()
+        c.duration = duration
+        c.crossfadein.return_value = c
+        return c
+
+    monkeypatch.setattr(main_module, "_make_clip_for_scene", fake_make_clip_for_scene)
+
+    mock_concat = mock.MagicMock()
+    mock_concat.duration = 3.0
+    mock_concat.audio = None
+    monkeypatch.setattr(main_module, "concatenate_videoclips", mock.Mock(return_value=mock_concat))
+
+    mock_composite = mock.MagicMock()
+    mock_composite.duration = 3.0
+    mock_composite.audio = None
+    mock_composite.write_videofile.side_effect = RuntimeError("abort render")
+    mock_composite.set_audio.return_value = mock_composite
+    monkeypatch.setattr(main_module, "CompositeVideoClip", mock.Mock(return_value=mock_composite))
+    monkeypatch.setattr(main_module, "_make_watermark_clip", mock.Mock(return_value=None))
+
+    import asyncio
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="abort render"):
+        asyncio.get_event_loop().run_until_complete(main_module.main_micro_learning(script))
+
+    video_engine_logs = [r.message for r in caplog.records if "[VIDEO_ENGINE]" in r.message]
+    assert video_engine_logs, (
+        "Expected at least one '[VIDEO_ENGINE] Processing ...' log line. "
+        f"All log messages: {[r.message for r in caplog.records]}"
+    )
+    log_line = video_engine_logs[0]
+    assert "original" in log_line, f"Log should mention scene type. Got: {log_line}"
+    assert "5" in log_line, f"Log should mention start_time 5. Got: {log_line}"
+    assert "8" in log_line, f"Log should mention end_time 8. Got: {log_line}"
+
